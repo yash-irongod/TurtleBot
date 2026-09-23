@@ -1,0 +1,210 @@
+/* English-only UI — importing the latin subset specifically (rather than the
+   default all-subsets file) drops Cyrillic/Greek/Vietnamese glyphs nothing
+   here ever uses. */
+@import '@fontsource/inter/latin-400.css';
+@import '@fontsource/inter/latin-500.css';
+@import '@fontsource/inter/latin-600.css';
+@import '@fontsource/inter/latin-700.css';
+@import '@fontsource/jetbrains-mono/latin-400.css';
+@import '@fontsource/jetbrains-mono/latin-500.css';
+@import '@fontsource/jetbrains-mono/latin-600.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background-color: #04060a;
+  color: #eaf3f9;
+  font-family: 'Inter', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow: hidden;
+}
+
+/* Ambient operating-environment background: faint grid + two soft radial glows. */
+.command-bg {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  background-color: #04060a;
+  background-image:
+    radial-gradient(ellipse 900px 560px at 18% -10%, rgba(47, 191, 255, 0.08), transparent 60%),
+    radial-gradient(ellipse 700px 500px at 100% 100%, rgba(47, 191, 255, 0.05), transparent 60%),
+    linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+  background-size: auto, auto, 42px 42px, 42px 42px;
+  background-position: 0 0, 0 0, -1px -1px, -1px -1px;
+}
+
+.command-bg::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: repeating-linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0.014) 0px,
+    rgba(255, 255, 255, 0.014) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+  mix-blend-mode: overlay;
+  opacity: 0.5;
+}
+
+/* Thin, quiet scrollbars in keeping with the instrument aesthetic. */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(93, 209, 255, 0.18);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(93, 209, 255, 0.32);
+}
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(93, 209, 255, 0.18) transparent;
+}
+
+/* Visible keyboard focus, styled to match the instrument aesthetic rather than the browser default. */
+:focus-visible {
+  outline: 2px solid rgba(93, 209, 255, 0.6);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* SVG goal handles do not receive a browser outline, so provide an equally
+   visible focus indicator for their keyboard nudge controls. */
+.map-goal-focus-ring {
+  opacity: 0;
+}
+
+.map-goal-handle:focus-visible .map-goal-focus-ring {
+  opacity: 1;
+  stroke-dasharray: 3 3;
+}
+
+.map-goal-handle:active {
+  cursor: grabbing;
+}
+
+/* A laptop-height console should preserve the spatial workspace rather than
+   spending most of its vertical budget on mode descriptions. This only
+   affects desktop widths at short heights; the fuller mode explanations stay
+   available everywhere else. */
+@media (min-width: 1024px) and (max-height: 780px) {
+  .command-view {
+    gap: 0.625rem;
+    padding: 0.625rem 0.75rem;
+  }
+
+  .command-view-header,
+  .command-workspace,
+  .command-workspace > aside {
+    gap: 0.625rem;
+  }
+
+  .command-brief {
+    padding-top: 0.625rem !important;
+    padding-bottom: 0.625rem !important;
+  }
+
+  .command-mode-switcher {
+    gap: 0.625rem;
+  }
+
+  .command-mode-switcher .mode-switcher-card {
+    min-height: 96px;
+    padding: 0.625rem 0.75rem;
+  }
+
+  .command-mode-switcher .mode-switcher-icon {
+    height: 2rem;
+    width: 2rem;
+  }
+
+  .command-mode-switcher .mode-switcher-icon svg {
+    height: 1rem;
+    width: 1rem;
+  }
+
+  .command-mode-switcher .mode-switcher-title {
+    margin-top: 0.5rem;
+    font-size: 0.75rem;
+  }
+
+  .command-mode-switcher .mode-switcher-tagline {
+    margin-top: 0;
+    font-size: 0.5rem;
+  }
+
+  .command-mode-switcher .mode-switcher-description {
+    display: none;
+  }
+
+  .command-mode-switcher .mode-switcher-active {
+    right: 0.625rem;
+    top: 0.625rem;
+    font-size: 0.5rem;
+  }
+
+  .command-radar {
+    height: 150px;
+  }
+
+  .command-telemetry {
+    min-height: 0;
+  }
+
+  .control-deck {
+    height: 84px;
+    gap: 0.625rem;
+  }
+
+  .control-deck-estop {
+    height: 64px;
+    width: 64px;
+  }
+
+  .control-deck-estop-core {
+    height: 50px;
+    width: 50px;
+  }
+
+  .control-deck-estop-icon {
+    height: 1rem;
+    width: 1rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
