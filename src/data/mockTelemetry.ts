@@ -1,5 +1,5 @@
 import type { LidarScan, MotorState, NetworkState, OdometryState, BatteryState, ImuState, RobotDataSource, RobotTelemetry, VelocityCommand } from '../types/robot'
-import { angularDelta, clamp, lerp, normalizeDeg, pseudoRandom } from '../lib/polar'
+import { clamp, normalizeDeg, pseudoRandom } from '../lib/polar'
 import { SAFE_ANGULAR_RADPS, SAFE_LINEAR_MPS, SAFE_REVERSE_MPS } from '../lib/safety'
 
 /**
@@ -11,39 +11,52 @@ import { SAFE_ANGULAR_RADPS, SAFE_LINEAR_MPS, SAFE_REVERSE_MPS } from '../lib/sa
  * when the application is in LIVE mode.
  */
 
+import { DEMO_OBSTACLE_ITEMS } from './mapGrid'
+
 const LIDAR_RANGE_MAX_M = 3.5
 const LIDAR_STEP_DEG = 2
 
-interface MockObstacle {
-  centerDeg: number
-  widthDeg: number
-  distanceM: number
-  driftDegPerTick: number
-}
-
-const OBSTACLES: MockObstacle[] = [
-  { centerDeg: 35, widthDeg: 55, distanceM: 1.15, driftDegPerTick: 0.12 },
-  { centerDeg: 205, widthDeg: 28, distanceM: 0.62, driftDegPerTick: -0.07 },
-  { centerDeg: 300, widthDeg: 65, distanceM: 1.85, driftDegPerTick: 0.05 },
-]
-
-export function generateLidarScan(tick: number): LidarScan {
+export function generateLidarScan(tick: number, odometry?: OdometryState): LidarScan {
   const points: LidarScan['points'] = []
-  for (let angleDeg = 0; angleDeg < 360; angleDeg += LIDAR_STEP_DEG) {
-    let distance = LIDAR_RANGE_MAX_M - 0.15 + Math.sin((angleDeg * Math.PI) / 97) * 0.12
+  const robX = odometry?.position.x ?? 0
+  const robY = odometry?.position.y ?? 0
+  const headingDeg = odometry?.headingDeg ?? 0
+  const headingRad = (headingDeg * Math.PI) / 180
 
-    for (const obstacle of OBSTACLES) {
-      const center = normalizeDeg(obstacle.centerDeg + tick * obstacle.driftDegPerTick)
-      const delta = Math.abs(angularDelta(angleDeg, center))
-      const halfWidth = obstacle.widthDeg / 2
-      if (delta < halfWidth) {
-        const falloff = 1 - delta / halfWidth
-        distance = Math.min(distance, lerp(distance, obstacle.distanceM, falloff))
+  for (let angleDeg = 0; angleDeg < 360; angleDeg += LIDAR_STEP_DEG) {
+    const rayAngleRad = headingRad + (angleDeg * Math.PI) / 180
+    const dirX = Math.sin(rayAngleRad)
+    const dirY = -Math.cos(rayAngleRad)
+
+    let minDistance = LIDAR_RANGE_MAX_M
+
+    // Test against static disaster arena obstacles
+    for (const obs of DEMO_OBSTACLE_ITEMS) {
+      const toObsX = obs.x - robX
+      const toObsY = obs.y - robY
+      const proj = toObsX * dirX + toObsY * dirY
+      if (proj > 0) {
+        const perpSq = toObsX * toObsX + toObsY * toObsY - proj * proj
+        const rSq = obs.radius * obs.radius
+        if (perpSq < rSq) {
+          const hitDist = proj - Math.sqrt(Math.max(0, rSq - perpSq))
+          if (hitDist > 0.05 && hitDist < minDistance) {
+            minDistance = hitDist
+          }
+        }
       }
     }
 
-    const jitter = (pseudoRandom(angleDeg + tick * 13.7) - 0.5) * 0.05
-    points.push({ angleDeg, distanceM: clamp(distance + jitter, 0.12, LIDAR_RANGE_MAX_M) })
+    // Outer arena perimeter bounds (x in [-3.4, 3.4], y in [-2.2, 2.2])
+    const xWall = dirX > 0 ? (3.4 - robX) / dirX : dirX < 0 ? (-3.4 - robX) / dirX : 999
+    const yWall = dirY > 0 ? (2.2 - robY) / dirY : dirY < 0 ? (-2.2 - robY) / dirY : 999
+    const wallDist = Math.min(xWall > 0 ? xWall : 999, yWall > 0 ? yWall : 999)
+    if (wallDist < minDistance) {
+      minDistance = wallDist
+    }
+
+    const jitter = (pseudoRandom(angleDeg + tick * 13.7) - 0.5) * 0.015
+    points.push({ angleDeg, distanceM: clamp(minDistance + jitter, 0.12, LIDAR_RANGE_MAX_M) })
   }
   return { points, rangeMaxM: LIDAR_RANGE_MAX_M, timestamp: Date.now() }
 }
@@ -130,7 +143,7 @@ function createInitialTelemetry(): RobotTelemetry {
     odometry,
     battery: { percentage: 87, voltage: 12.1, current: -0.9, charging: false },
     imu: stepImu(odometry, 0),
-    lidar: generateLidarScan(0),
+    lidar: generateLidarScan(0, odometry),
     motors: stepMotors(odometry, 0),
     network: stepNetwork(),
     temperatureC: 37.4,
@@ -153,7 +166,7 @@ function step(
     odometry,
     battery,
     imu: stepImu(odometry, tick),
-    lidar: generateLidarScan(tick),
+    lidar: generateLidarScan(tick, odometry),
     motors: stepMotors(odometry, tick),
     network: stepNetwork(),
     temperatureC: clamp(prev.temperatureC + (pseudoRandom(tick) - 0.5) * 0.006, 30, 55),

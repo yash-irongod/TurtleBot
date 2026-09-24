@@ -106,10 +106,10 @@ export function Drive3DView({
     const cleanupFns: (() => void)[] = []
 
     try {
-      // 1. Three.js Scene (Titan Cosmic Sky & Sunset Atmosphere)
+      // 1. Three.js Scene (Disaster Sky & Sunset Atmosphere)
       const scene = new THREE.Scene()
-      scene.background = new THREE.Color(0x130224)
-      scene.fog = new THREE.FogExp2(0x2d0b30, 0.022)
+      scene.background = new THREE.Color(0x18071f)
+      scene.fog = new THREE.FogExp2(0x240d1c, 0.009)
 
       // 2. High-Performance WebGL Renderer
       // Try-catch: browsers limit WebGL contexts to ~8-16; creation can fail silently.

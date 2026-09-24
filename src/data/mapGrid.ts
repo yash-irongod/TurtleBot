@@ -14,19 +14,23 @@ import type { CellState, OccupancyGrid, Position2D } from '../types/robot'
 const RESOLUTION_M = 0.12
 const WORLD = { xMin: -3.6, xMax: 3.6, yMin: -2.4, yMax: 2.4 }
 
-// Natural Titan planetary formations (Basalt outcrops, ruined monoliths, crater rims)
-const TITAN_FORMATIONS_M = [
-  // Basalt ridge formation
-  { xMin: -1.9, xMax: -1.0, yMin: -1.4, yMax: -0.8 },
-  // Alien monolith spires
-  { xMin: 0.8, xMax: 1.7, yMin: 0.5, yMax: 1.2 },
-  // Ruined gantry pylon rubble
-  { xMin: -0.7, xMax: -0.2, yMin: 1.1, yMax: 1.5 },
-  // Impact crater rim boulders
-  { xMin: 1.7, xMax: 2.5, yMin: -1.5, yMax: -0.9 },
-  // Scattered obsidian crags
-  { xMin: -2.8, xMax: -2.2, yMin: 0.2, yMax: 0.8 },
-  { xMin: 2.3, xMax: 2.9, yMin: 0.8, yMax: 1.4 },
+// Sparse, realistic disaster items (matching user specification: fallen drum, slabs, cone, tilted pipe)
+export interface DemoObstacleItem {
+  id: string
+  type: 'fallen_drum' | 'slab' | 'cone' | 'tilted_pipe' | 'upright_drum'
+  x: number
+  y: number
+  radius: number
+  label: string
+}
+
+export const DEMO_OBSTACLE_ITEMS: DemoObstacleItem[] = [
+  { id: 'obs-fallen-drum', type: 'fallen_drum', x: -1.3, y: -0.7, radius: 0.26, label: 'Fallen Hazmat Drum' },
+  { id: 'obs-slab-1', type: 'slab', x: 1.3, y: -0.8, radius: 0.36, label: 'Shattered Slab & Rebar' },
+  { id: 'obs-cone', type: 'cone', x: 0.8, y: 1.2, radius: 0.22, label: 'Safety Cones' },
+  { id: 'obs-tilted-pipe', type: 'tilted_pipe', x: -1.4, y: 0.9, radius: 0.32, label: 'Tilted Drainage Pipe' },
+  { id: 'obs-upright-drum', type: 'upright_drum', x: 0.3, y: -1.5, radius: 0.24, label: 'Weathered Fuel Drum' },
+  { id: 'obs-slab-2', type: 'slab', x: -0.8, y: 1.4, radius: 0.30, label: 'Concrete Foundation Debris' },
 ]
 
 const WIDTH_CELLS = Math.round((WORLD.xMax - WORLD.xMin) / RESOLUTION_M)
@@ -44,16 +48,16 @@ function buildDemoGrid(): OccupancyGrid {
   const cells: CellState[] = new Array(WIDTH_CELLS * HEIGHT_CELLS).fill('free')
   const at = (row: number, col: number) => row * WIDTH_CELLS + col
 
-  // 1. Natural Planetary Formations & Ruined Monoliths (NO 4-walled rectangular room!)
-  for (const obs of TITAN_FORMATIONS_M) {
-    const tl = worldToCell({ x: obs.xMin, y: obs.yMin })
-    const br = worldToCell({ x: obs.xMax, y: obs.yMax })
-    for (let row = tl.row; row <= br.row; row++) {
-      for (let col = tl.col; col <= br.col; col++) {
-        if (row >= 0 && row < HEIGHT_CELLS && col >= 0 && col < WIDTH_CELLS) {
-          // Add organic variation so it doesn't look like rigid bricks
-          const edgeDist = Math.min(row - tl.row, br.row - row, col - tl.col, br.col - col)
-          if (edgeDist > 0 || (row + col) % 3 !== 0) {
+  // 1. Mark cells occupied for the few distinct disaster items
+  for (const item of DEMO_OBSTACLE_ITEMS) {
+    const centerCell = worldToCell({ x: item.x, y: item.y })
+    const rCells = Math.max(1, Math.round(item.radius / RESOLUTION_M))
+    for (let dr = -rCells; dr <= rCells; dr++) {
+      for (let dc = -rCells; dc <= rCells; dc++) {
+        if (dr * dr + dc * dc <= rCells * rCells) {
+          const row = centerCell.row + dr
+          const col = centerCell.col + dc
+          if (row >= 0 && row < HEIGHT_CELLS && col >= 0 && col < WIDTH_CELLS) {
             cells[at(row, col)] = 'occupied'
           }
         }
@@ -61,11 +65,11 @@ function buildDemoGrid(): OccupancyGrid {
     }
   }
 
-  // 2. Natural Border Formations at far perimeter edges (scattered rock crags, not a solid wall)
+  // 2. Outer arena perimeter border (perimeter bounds at ±3.4m X, ±2.2m Y)
   for (let row = 0; row < HEIGHT_CELLS; row++) {
     for (let col = 0; col < WIDTH_CELLS; col++) {
-      const isOuterEdge = row <= 1 || row >= HEIGHT_CELLS - 2 || col <= 1 || col >= WIDTH_CELLS - 2
-      if (isOuterEdge && (row * 7 + col * 13) % 4 === 0) {
+      const isPerimeter = row === 0 || row === HEIGHT_CELLS - 1 || col === 0 || col === WIDTH_CELLS - 1
+      if (isPerimeter) {
         cells[at(row, col)] = 'occupied'
       }
     }

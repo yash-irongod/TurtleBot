@@ -48,7 +48,7 @@ function Shell() {
           <main className="min-w-0 flex-1 overflow-y-auto overflow-x-hidden lg:overflow-hidden" aria-label="Operator workspace">
             <div className="h-full min-h-0 animate-fade-in">
               {/* Per-view error boundary: a crash in one view never blacks out the whole shell */}
-              <ErrorBoundary label={`${activeSection} View Error`}>
+              <ErrorBoundary key={activeSection} label={`${activeSection} View Error`}>
                 <ActiveView />
               </ErrorBoundary>
             </div>
