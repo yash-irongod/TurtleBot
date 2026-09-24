@@ -30,7 +30,7 @@ function createDesignatedBoundaryManager(): DesignatedBoundaryManager {
 
   const shieldHeight = 0.35 // Proportionate height (Burger height is 0.19m)
   let hasSlamMap = false
-  let lastLidarUpdateAt = 0
+  let lastGridSignature = ''
 
   // 1. Crystal-Clear Holographic Energy Texture Canvas
   const canvas = document.createElement('canvas')
@@ -105,13 +105,6 @@ function createDesignatedBoundaryManager(): DesignatedBoundaryManager {
     blending: THREE.AdditiveBlending,
   })
 
-  const hazardMat = new THREE.LineBasicMaterial({
-    color: 0xf59e0b,
-    transparent: true,
-    opacity: 0.65,
-    blending: THREE.AdditiveBlending,
-  })
-
   // Shared corner pylon geometry
   const pylonBaseGeo = new THREE.CylinderGeometry(0.030, 0.040, 0.04, 16)
   const pylonBaseMat = new THREE.MeshStandardMaterial({ color: 0x181524, roughness: 0.4, metalness: 0.85 })
@@ -126,7 +119,6 @@ function createDesignatedBoundaryManager(): DesignatedBoundaryManager {
   })
 
   let activeCrystals: THREE.Mesh[] = []
-  let lidarBoundaryGroup: THREE.Group | null = null
 
   const createPylon = (x: number, z: number): THREE.Group => {
     const pylon = new THREE.Group()
@@ -167,7 +159,6 @@ function createDesignatedBoundaryManager(): DesignatedBoundaryManager {
       }
     }
     activeCrystals = []
-    lidarBoundaryGroup = null
   }
 
   const buildAwaitingBoundary = () => {
@@ -271,30 +262,36 @@ function createDesignatedBoundaryManager(): DesignatedBoundaryManager {
     const cells = grid.cells
 
     if (w <= 0 || h <= 0 || !cells || cells.length === 0) {
-      hasSlamMap = false
+      if (hasSlamMap) return
+      clearDynamicChildren()
       buildAwaitingBoundary()
       return
     }
 
     // Check if any occupied cells exist
-    let hasOccupied = false
+    let occupiedCount = 0
     for (let i = 0; i < cells.length; i++) {
       if (cells[i] === 'occupied') {
-        hasOccupied = true
-        break
+        occupiedCount++
       }
     }
 
-    if (!hasOccupied) {
-      hasSlamMap = false
+    if (occupiedCount === 0) {
+      if (hasSlamMap) return
+      clearDynamicChildren()
       buildAwaitingBoundary()
       return
     }
 
+    const sig = `${w}_${h}_${occupiedCount}_${origin.x.toFixed(2)}_${origin.y.toFixed(2)}`
+    if (sig === lastGridSignature) return
+    lastGridSignature = sig
+
+    clearDynamicChildren()
+
     // 1. Cluster all occupied cells using BFS to separate Outer Perimeter Walls from Interior Objects
     const visited = new Uint8Array(w * h)
     const perimeterCellSet = new Set<number>()
-    const interiorObstacles: Array<{ cx: number; cz: number; wX: number; wZ: number }> = []
 
     for (let r = 0; r < h; r++) {
       for (let c = 0; c < w; c++) {
@@ -349,20 +346,11 @@ function createDesignatedBoundaryManager(): DesignatedBoundaryManager {
         const spanX = (maxC - minC + 1) * res
         const spanZ = (maxR - minR + 1) * res
 
-        // An Interior Object is small (< 0.7m in both dims) and does NOT touch unknown space.
-        // It is an obstacle inside the room, NOT an arena perimeter wall!
-        const isInteriorObject = spanX < 0.70 && spanZ < 0.70 && !touchesUnknown
+        // An Interior Object is small (< 0.85m in both dims) and does NOT touch unknown space.
+        // It is an obstacle inside the room handled by obstacleManager, NOT an arena perimeter wall!
+        const isInteriorObject = spanX < 0.85 && spanZ < 0.85 && !touchesUnknown
 
-        if (isInteriorObject) {
-          const cx = origin.x + (minC + maxC + 1) * 0.5 * res
-          const cz = origin.y + (minR + maxR + 1) * 0.5 * res
-          interiorObstacles.push({
-            cx,
-            cz,
-            wX: Math.max(res * 1.5, spanX),
-            wZ: Math.max(res * 1.5, spanZ),
-          })
-        } else {
+        if (!isInteriorObject) {
           // Perimeter wall or large room partition
           for (const cIdx of clusterIndices) {
             perimeterCellSet.add(cIdx)
@@ -371,22 +359,7 @@ function createDesignatedBoundaryManager(): DesignatedBoundaryManager {
       }
     }
 
-    // 2. Render low-profile hazard ground footprints for Interior Objects (NO forcefield wall / NO crystals!)
-    interiorObstacles.forEach(({ cx, cz, wX, wZ }) => {
-      const halfX = wX * 0.5
-      const halfZ = wZ * 0.5
-      const footPts = [
-        new THREE.Vector3(cx - halfX, 0.02, cz - halfZ),
-        new THREE.Vector3(cx + halfX, 0.02, cz - halfZ),
-        new THREE.Vector3(cx + halfX, 0.02, cz + halfZ),
-        new THREE.Vector3(cx - halfX, 0.02, cz + halfZ),
-      ]
-      const loopGeo = new THREE.BufferGeometry().setFromPoints(footPts)
-      const loop = new THREE.LineLoop(loopGeo, hazardMat)
-      group.add(loop)
-    })
-
-    // 3. Extract boundary edges ONLY for perimeter wall cells that face free space (room interior)
+    // 2. Extract boundary edges ONLY for perimeter wall cells that face free space (room interior)
     const horizMap = new Map<number, Array<{ x1: number; x2: number }>>()
     const vertMap = new Map<number, Array<{ z1: number; z2: number }>>()
 
@@ -584,90 +557,10 @@ function createDesignatedBoundaryManager(): DesignatedBoundaryManager {
 
   /**
    * Real-Time LiDAR Dynamic Boundary:
-   * When live SLAM /map is not yet publishing, dynamically constructs the real-time operational
-   * boundary directly from the active 360° LiDAR stream. Zero lag, simultaneous updates at full frame rate!
+   * Smooth fallback while awaiting global SLAM map
    */
-  const updateFromLidar = (points: LidarPoint[], robotPos: Position2D, headingDeg: number) => {
-    // If global SLAM map is active with occupied cells, SLAM is authoritative
-    if (hasSlamMap || !points || points.length < 16) return
-
-    const now = performance.now()
-    if (now - lastLidarUpdateAt < 100) return // Throttle rebuild to ~10 Hz
-    lastLidarUpdateAt = now
-
-    // Remove previous dynamic LiDAR boundary
-    if (lidarBoundaryGroup) {
-      group.remove(lidarBoundaryGroup)
-      lidarBoundaryGroup.traverse((obj) => {
-        if (obj instanceof THREE.Mesh || obj instanceof THREE.LineSegments || obj instanceof THREE.Line || obj instanceof THREE.LineLoop) {
-          obj.geometry?.dispose()
-        }
-      })
-      lidarBoundaryGroup = null
-    }
-
-    const headingRad = (headingDeg * Math.PI) / 180
-    const sectorCount = 32
-    const maxRanges = new Float32Array(sectorCount).fill(0)
-    const sectorAngles = new Float32Array(sectorCount)
-
-    for (let s = 0; s < sectorCount; s++) {
-      sectorAngles[s] = (s / sectorCount) * Math.PI * 2
-    }
-
-    for (let i = 0; i < points.length; i++) {
-      const pt = points[i]
-      if (pt.distanceM < 0.35 || pt.distanceM > 4.5) continue
-      const ptAngleRad = (pt.angleDeg * Math.PI) / 180
-      const totalAngle = (headingRad + ptAngleRad) % (Math.PI * 2)
-      const normAngle = totalAngle < 0 ? totalAngle + Math.PI * 2 : totalAngle
-      const sector = Math.floor((normAngle / (Math.PI * 2)) * sectorCount) % sectorCount
-
-      if (pt.distanceM > maxRanges[sector]) {
-        maxRanges[sector] = pt.distanceM
-      }
-    }
-
-    const ringPts: THREE.Vector3[] = []
-    const topPts: THREE.Vector3[] = []
-    let validCount = 0
-
-    for (let s = 0; s < sectorCount; s++) {
-      const dist = maxRanges[s] || 1.4
-      if (maxRanges[s] > 0) validCount++
-      const a = sectorAngles[s]
-      const wx = robotPos.x + Math.sin(a) * dist
-      const wz = robotPos.y - Math.cos(a) * dist
-      ringPts.push(new THREE.Vector3(wx, 0.01, wz))
-      topPts.push(new THREE.Vector3(wx, shieldHeight, wz))
-    }
-
-    if (validCount < 8) return
-
-    lidarBoundaryGroup = new THREE.Group()
-    lidarBoundaryGroup.name = 'RealTime_LiDAR_Dynamic_Boundary'
-
-    // Footing loop
-    const footGeo = new THREE.BufferGeometry().setFromPoints(ringPts)
-    const footLoop = new THREE.LineLoop(footGeo, footingRailMat)
-    lidarBoundaryGroup.add(footLoop)
-
-    // Top containment laser loop
-    const topGeo = new THREE.BufferGeometry().setFromPoints(topPts)
-    const topLoop = new THREE.LineLoop(topGeo, topRailMat)
-    lidarBoundaryGroup.add(topLoop)
-
-    // Vertical boundary laser struts (every 4 sectors)
-    const strutPositions: number[] = []
-    for (let s = 0; s < sectorCount; s += 4) {
-      strutPositions.push(ringPts[s].x, ringPts[s].y, ringPts[s].z, topPts[s].x, topPts[s].y, topPts[s].z)
-    }
-    const strutGeo = new THREE.BufferGeometry()
-    strutGeo.setAttribute('position', new THREE.Float32BufferAttribute(strutPositions, 3))
-    const struts = new THREE.LineSegments(strutGeo, awaitingMat)
-    lidarBoundaryGroup.add(struts)
-
-    group.add(lidarBoundaryGroup)
+  const updateFromLidar = (_points: LidarPoint[], _robotPos: Position2D, _headingDeg: number) => {
+    // Dormant once SLAM map is active; radar rings provide clean, stable boundary awaiting SLAM
   }
 
   const update = (dtSec: number, pulseTime: number) => {
@@ -688,7 +581,6 @@ function createDesignatedBoundaryManager(): DesignatedBoundaryManager {
     topRailMat.dispose()
     footingRailMat.dispose()
     awaitingMat.dispose()
-    hazardMat.dispose()
     pylonBaseMat.dispose()
     pylonRodMat.dispose()
     crystalMat.dispose()
@@ -1455,38 +1347,138 @@ function createRealTimeObstacleManager(loader: THREE.TextureLoader) {
   const liveObstacleKeys = new Set<string>()
 
   /**
-   * Builds the clean, sparse disaster arena obstacles for DEMO mode.
-   * In LIVE mode, occupied cells and walls from ROS are constructed directly
-   * as the real-time designated boundary — never converted into random objects (cones, drums, pipes, slabs)!
+   * Builds the clean, sparse disaster arena obstacles for DEMO mode,
+   * and populates detected real interior obstacles with the designed 3D disaster props in LIVE mode!
    */
-  const buildMappedObstacles = (_grid: OccupancyGrid, isLive = false) => {
-    while (rootGroup.children.length > 0) {
-      const child = rootGroup.children[0]
-      rootGroup.remove(child)
-    }
-    liveObstacleKeys.clear()
+  const buildMappedObstacles = (grid: OccupancyGrid, isLive = false) => {
+    if (!isLive) {
+      // In DEMO mode: Build the 6 sparse disaster items
+      while (rootGroup.children.length > 0) {
+        const child = rootGroup.children[0]
+        rootGroup.remove(child)
+      }
+      liveObstacleKeys.clear()
 
-    // IN LIVE MODE: Never spawn random objects along real walls or mapped space!
-    // The real-time designated boundary manager handles all real room walls and bounds.
-    if (isLive) {
+      for (const item of DEMO_OBSTACLE_ITEMS) {
+        let obj: THREE.Group
+        if (item.type === 'fallen_drum') {
+          obj = createFallenDrum(item.x, item.y, 0.5, 0.22)
+        } else if (item.type === 'slab') {
+          obj = createSlabWithRebar(item.x, item.y, 0.44, 0.13, 0.30, item.id === 'obs-slab-1' ? 0.35 : -0.5)
+        } else if (item.type === 'cone') {
+          obj = createSafetyConeGroup(item.x, item.y, 0.2)
+        } else if (item.type === 'tilted_pipe') {
+          obj = createTiltedEmergingPipe(item.x, item.y, 0.13, 0.65, 0.52, -0.45)
+        } else {
+          obj = createUprightDrum(item.x, item.y, 0.1, 0.04)
+        }
+        rootGroup.add(obj)
+      }
       return
     }
 
-    // In DEMO mode: Build the 6 sparse disaster items
-    for (const item of DEMO_OBSTACLE_ITEMS) {
-      let obj: THREE.Group
-      if (item.type === 'fallen_drum') {
-        obj = createFallenDrum(item.x, item.y, 0.5, 0.22)
-      } else if (item.type === 'slab') {
-        obj = createSlabWithRebar(item.x, item.y, 0.44, 0.13, 0.30, item.id === 'obs-slab-1' ? 0.35 : -0.5)
-      } else if (item.type === 'cone') {
-        obj = createSafetyConeGroup(item.x, item.y, 0.2)
-      } else if (item.type === 'tilted_pipe') {
-        obj = createTiltedEmergingPipe(item.x, item.y, 0.13, 0.65, 0.52, -0.45)
-      } else {
-        obj = createUprightDrum(item.x, item.y, 0.1, 0.04)
+    // In LIVE mode: Instantiate the designed 3D disaster obstacles at real mapped obstacle positions
+    const w = grid.widthCells
+    const h = grid.heightCells
+    const res = grid.resolutionM
+    const origin = grid.origin
+    const cells = grid.cells
+
+    if (w <= 0 || h <= 0 || !cells || cells.length === 0) return
+
+    const visited = new Uint8Array(w * h)
+    const newObstacleKeys = new Set<string>()
+
+    for (let r = 0; r < h; r++) {
+      for (let c = 0; c < w; c++) {
+        const idx = r * w + c
+        if (cells[idx] !== 'occupied' || visited[idx]) continue
+
+        visited[idx] = 1
+        const queue = [idx]
+        let minC = c
+        let maxC = c
+        let minR = r
+        let maxR = r
+        let touchesUnknown = false
+        let count = 1
+
+        while (queue.length > 0) {
+          const curr = queue.shift()!
+          const currC = curr % w
+          const currR = Math.floor(curr / w)
+
+          for (let dr = -1; dr <= 1; dr++) {
+            for (let dc = -1; dc <= 1; dc++) {
+              if (dr === 0 && dc === 0) continue
+              const nr = currR + dr
+              const nc = currC + dc
+              if (nc < 0 || nc >= w || nr < 0 || nr >= h) {
+                touchesUnknown = true
+                continue
+              }
+              const nIdx = nr * w + nc
+              const nState = cells[nIdx]
+              if (nState === 'unknown') {
+                touchesUnknown = true
+              } else if (nState === 'occupied' && !visited[nIdx]) {
+                visited[nIdx] = 1
+                queue.push(nIdx)
+                count++
+                minC = Math.min(minC, nc)
+                maxC = Math.max(maxC, nc)
+                minR = Math.min(minR, nr)
+                maxR = Math.max(maxR, nr)
+              }
+            }
+          }
+        }
+
+        const spanX = (maxC - minC + 1) * res
+        const spanZ = (maxR - minR + 1) * res
+
+        // An interior obstacle is small (< 0.85m in both directions) and surrounded by free space
+        if (spanX < 0.85 && spanZ < 0.85 && !touchesUnknown && count >= 2) {
+          const cx = origin.x + (minC + maxC + 1) * 0.5 * res
+          const cz = origin.y + (minR + maxR + 1) * 0.5 * res
+          const key = `${cx.toFixed(1)}_${cz.toFixed(1)}`
+          newObstacleKeys.add(key)
+
+          if (!liveObstacleKeys.has(key)) {
+            liveObstacleKeys.add(key)
+            // Deterministically select the designed 3D disaster model for this position
+            const hash = Math.abs(Math.round(cx * 10) * 19 + Math.round(cz * 10) * 7) % 5
+            let obj: THREE.Group
+            if (hash === 0) {
+              obj = createSafetyConeGroup(cx, cz, (hash * 0.7) % Math.PI)
+            } else if (hash === 1) {
+              obj = createFallenDrum(cx, cz, (hash * 0.8) % Math.PI, 0.22)
+            } else if (hash === 2) {
+              obj = createUprightDrum(cx, cz, (hash * 0.5) % Math.PI)
+            } else if (hash === 3) {
+              obj = createSlabWithRebar(cx, cz, Math.min(0.48, Math.max(0.32, spanX)), 0.12, Math.min(0.35, Math.max(0.24, spanZ)), hash * 0.4)
+            } else {
+              obj = createTiltedEmergingPipe(cx, cz, 0.12, 0.55, 0.48, -0.35)
+            }
+            obj.name = `live_obstacle_${key}`
+            rootGroup.add(obj)
+          }
+        }
       }
-      rootGroup.add(obj)
+    }
+
+    // Clean up obstacles that are no longer present in the updated map
+    for (const key of Array.from(liveObstacleKeys)) {
+      if (!newObstacleKeys.has(key)) {
+        liveObstacleKeys.delete(key)
+        const existing = rootGroup.getObjectByName(`live_obstacle_${key}`)
+        if (existing) {
+          rootGroup.remove(existing)
+          existing.traverse((child) => {
+            if (child instanceof THREE.Mesh) child.geometry?.dispose()
+          })
+        }
+      }
     }
   }
 
