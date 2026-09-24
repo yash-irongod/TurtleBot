@@ -1,5 +1,5 @@
 import clsx from 'clsx'
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Battery, Eye, Gauge, MapPin, Radar } from 'lucide-react'
 import { useRobot } from '../context/RobotContext'
 import { GlassPanel } from '../components/common/GlassPanel'
@@ -69,31 +69,42 @@ function Readout({
   )
 }
 
-/** The primary workspace: 3D operator view with 2D map toggle. */
+/** The primary workspace: 2D SLAM/Nav2 map that smoothly engages 3D Chase Cam when navigating. */
 export function AutonomousView() {
-  const { sourceStatus, activeMode, emergencyStopped } = useRobot()
-  const is3DActive = isAutonomous3DActive({ sourceStatus, activeMode, emergencyStopped })
-  const [show2DMap, setShow2DMap] = useState(false)
+  const { sourceStatus, activeMode, emergencyStopped, navigation, exploration } = useRobot()
+  const is3DActive = isAutonomous3DActive({ sourceStatus, activeMode, emergencyStopped, navigation, exploration })
+  const [operatorOverride2D, setOperatorOverride2D] = useState(false)
+
+  // Reset override whenever active navigation route resets
+  useEffect(() => {
+    if (!is3DActive) {
+      setOperatorOverride2D(false)
+    }
+  }, [is3DActive])
+
+  const show3D = is3DActive && !operatorOverride2D
 
   return (
     <div className="grid h-full min-h-0 gap-3 p-3 sm:p-4 lg:grid-cols-[minmax(0,1fr)_310px]">
       <section className="relative min-h-[280px] min-w-0" aria-label="Autonomous workspace">
-        {is3DActive && !show2DMap ? (
+        {show3D ? (
           <AutonomousDrive3DView
-            onToggleFull2DMap={() => setShow2DMap(true)}
+            onToggleFull2DMap={() => setOperatorOverride2D(true)}
           />
         ) : (
           <div className="relative h-full w-full">
             <WorldMap />
-            <button
-              type="button"
-              onClick={() => setShow2DMap(false)}
-              className="absolute top-3 right-3 z-10 flex items-center gap-1.5 rounded-lg border border-signal-400/40 bg-void-950/85 px-3 py-1.5 font-mono text-[10px] font-semibold uppercase tracking-wider text-signal-300 shadow-xl backdrop-blur-md hover:bg-signal-900/60"
-              title="Switch to 3D View"
-            >
-              <Eye className="h-3.5 w-3.5" />
-              <span>3D Chase Cam</span>
-            </button>
+            {is3DActive && operatorOverride2D && (
+              <button
+                type="button"
+                onClick={() => setOperatorOverride2D(false)}
+                className="absolute top-3 right-3 z-10 flex items-center gap-1.5 rounded-lg border border-signal-400/40 bg-void-950/85 px-3 py-1.5 font-mono text-[10px] font-semibold uppercase tracking-wider text-signal-300 shadow-xl backdrop-blur-md hover:bg-signal-900/60"
+                title="Return to 3D Chase Cam"
+              >
+                <Eye className="h-3.5 w-3.5" />
+                <span>Return to 3D Chase Cam</span>
+              </button>
+            )}
           </div>
         )}
       </section>

@@ -108,10 +108,10 @@ export function DriveHud({
           </div>
         </div>
 
-        {/* Right: Camera Mode Toggles (Chase & FPV) */}
+        {/* Right: Camera Mode Toggles (Chase, FPV, Drone) */}
         <div className="pointer-events-auto flex items-center gap-1.5">
           <div className="flex items-center rounded-lg border border-white/[0.08] bg-void-950/85 p-0.5 shadow-lg backdrop-blur-md">
-            {(['CHASE', 'FPV'] as CameraMode[]).map((m) => (
+            {(['CHASE', 'FPV', 'ORBIT'] as CameraMode[]).map((m) => (
               <button
                 key={m}
                 type="button"
@@ -122,9 +122,9 @@ export function DriveHud({
                     ? 'border border-signal-400/40 bg-signal-500/25 text-signal-200 shadow-glow-sm'
                     : 'text-ink-400 hover:text-ink-100 hover:bg-white/[0.04]',
                 )}
-                title={`Switch camera to ${m} mode`}
+                title={`Switch camera to ${m === 'ORBIT' ? 'Drone' : m} mode`}
               >
-                {m === 'CHASE' ? 'Chase' : 'FPV'}
+                {m === 'CHASE' ? 'Chase' : m === 'FPV' ? 'FPV' : 'Drone'}
               </button>
             ))}
           </div>

@@ -380,9 +380,12 @@ export function Drive3DView({
         awaitingLiveMap={awaitingLiveMap}
       />
 
-      {/* Interactive 2D Minimap in bottom-left corner */}
+      {/* Interactive Floating Corner 2D Minimap */}
       {showMinimap && (
-        <div className="absolute bottom-3 left-3 z-20 h-44 w-44 overflow-hidden rounded-lg shadow-2xl border border-white/[0.12]">
+        <div
+          className="pointer-events-auto absolute bottom-4 left-4 z-20 h-[195px] w-[240px] sm:h-[210px] sm:w-[265px] rounded-xl overflow-hidden shadow-2xl border border-signal-400/35 backdrop-blur-md"
+          title="Interactive 2D Minimap"
+        >
           <WorldMap variant="minimap" onToggleMaximize={onToggleFull2DMap} />
         </div>
       )}

@@ -92,8 +92,8 @@ function CommandBrief() {
  * deliberate mode choice, with the world view remaining the working surface.
  */
 export function CommandView() {
-  const { sourceStatus, activeMode, emergencyStopped } = useRobot()
-  const is3DActive = isAutonomous3DActive({ sourceStatus, activeMode, emergencyStopped })
+  const { sourceStatus, activeMode, emergencyStopped, navigation, exploration } = useRobot()
+  const is3DActive = isAutonomous3DActive({ sourceStatus, activeMode, emergencyStopped, navigation, exploration })
   const [operatorOverride3D, setOperatorOverride3D] = useState(false)
   const [operatorOverride2D, setOperatorOverride2D] = useState(false)
 

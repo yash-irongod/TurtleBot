@@ -358,41 +358,41 @@ export function WorldMap({ compact = false, variant = 'standard', className, onT
         className,
       )}
     >
-      {!isMinimap && (
-        <div className={clsx('flex items-center justify-between gap-2', isCompact ? 'px-3 pt-3' : 'px-5 pt-4')}>
-          <div className="min-w-0">
-            <MicroLabel>{isCompact ? 'Map / world' : 'World map / map frame'}</MicroLabel>
-            {!isCompact && <div className="mt-0.5 text-[11px] text-ink-500">Occupancy, route, goal, and robot pose</div>}
-          </div>
-          <div className="flex shrink-0 items-center gap-1.5">
-            {canEditMapGoal && (
-              <span
-                className="hidden rounded-full border border-signal-400/20 bg-signal-900/20 px-2 py-1 font-mono text-[9px] uppercase tracking-[0.08em] text-signal-300 lg:inline-flex"
-                title={goalEditHint}
-              >
-                Click map · drag goal
-              </span>
-            )}
+      <div className={clsx('flex items-center justify-between gap-2', isMinimap ? 'px-2.5 pt-2 pb-1' : isCompact ? 'px-3 pt-3' : 'px-5 pt-4')}>
+        <div className="min-w-0">
+          <MicroLabel>{isMinimap ? 'Minimap' : isCompact ? 'Map / world' : 'World map / map frame'}</MicroLabel>
+          {!isCompact && <div className="mt-0.5 text-[11px] text-ink-500">Occupancy, route, goal, and robot pose</div>}
+        </div>
+        <div className="flex shrink-0 items-center gap-1.5">
+          {canEditMapGoal && (
+            <span
+              className={clsx(
+                'rounded-full border border-signal-400/20 bg-signal-900/20 font-mono uppercase tracking-[0.08em] text-signal-300',
+                isMinimap ? 'px-1.5 py-0.5 text-[8px]' : 'hidden px-2 py-1 text-[9px] lg:inline-flex',
+              )}
+              title={goalEditHint}
+            >
+              {isMinimap ? 'Drag Goal' : 'Click map · drag goal'}
+            </span>
+          )}
+          {!isMinimap && (
             <span className={clsx('rounded-full border px-2 py-1 font-mono text-[9px] uppercase tracking-[0.1em]', source.className)}>
               {compact ? source.compactLabel : source.label}
             </span>
-          </div>
+          )}
+          {isMinimap && onToggleMaximize && (
+            <button
+              type="button"
+              onClick={onToggleMaximize}
+              className="rounded p-1 text-ink-400 hover:bg-white/[0.08] hover:text-ink-100"
+              title="Expand 2D map"
+              aria-label="Expand 2D map"
+            >
+              <span className="font-mono text-[10px]">↗</span>
+            </button>
+          )}
         </div>
-      )}
-
-      {isMinimap && onToggleMaximize && (
-        <div className="absolute top-1 right-1 z-10">
-          <button
-            type="button"
-            onClick={onToggleMaximize}
-            className="rounded bg-void-950/80 p-1 text-ink-400 hover:bg-white/[0.1] hover:text-ink-100 backdrop-blur-sm border border-white/[0.08]"
-            title="Expand map"
-            aria-label="Expand map"
-          >
-            <span className="font-mono text-[11px] leading-none">↗</span>
-          </button>
-        </div>
-      )}
+      </div>
 
       <div className={clsx('relative flex min-h-0 flex-1 items-center justify-center', isMinimap ? 'p-1 pb-2' : compact ? 'p-2' : 'px-4 pb-4 pt-3')}>
         <svg
