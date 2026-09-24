@@ -1,0 +1,6 @@
+{
+  "name": "TurtleBot Control Center",
+  "description": "TurtleBot3 robotics control center — live telemetry, spatial awareness, and manual control.",
+  "permissions": [],
+  "capabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
