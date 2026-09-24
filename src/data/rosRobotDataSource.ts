@@ -32,6 +32,23 @@ const DEFAULT_ROS_BRIDGE_URL = 'ws://192.168.0.112:8765'
 const RECONNECT_DELAY_MS = 3000
 const LIDAR_RANGE_MAX_DEFAULT = 3.5
 
+export function getStoredBridgeUrl(): string {
+  if (typeof window !== 'undefined') {
+    const urlParam = new URLSearchParams(window.location.search).get('bridge_url')
+    if (urlParam) return urlParam
+    const stored = localStorage.getItem('turtlebot_bridge_url')
+    if (stored) return stored
+  }
+  return (typeof import.meta !== 'undefined' && import.meta.env?.VITE_ROS_BRIDGE_URL) || DEFAULT_ROS_BRIDGE_URL
+}
+
+export function setStoredBridgeUrl(url: string): void {
+  if (typeof window !== 'undefined') {
+    localStorage.setItem('turtlebot_bridge_url', url)
+    window.dispatchEvent(new CustomEvent('turtlebot_bridge_url_change', { detail: { url } }))
+  }
+}
+
 function createFallbackTelemetry(): RobotTelemetry {
   const odometry: OdometryState = {
     position: { x: 0, y: 0 },
@@ -355,7 +372,7 @@ export interface RosRobotDataSourceOptions {
  * - Real /map OccupancyGrid streaming & conversion
  */
 export function createRosRobotDataSource(options: RosRobotDataSourceOptions = {}): RobotDataSource {
-  const url = options.url ?? DEFAULT_ROS_BRIDGE_URL
+  let currentUrl = options.url ?? getStoredBridgeUrl()
   let status: RobotSourceStatus = 'DISCONNECTED'
   let telemetry = createFallbackTelemetry()
   let ws: WebSocket | null = null
@@ -367,6 +384,19 @@ export function createRosRobotDataSource(options: RosRobotDataSourceOptions = {}
   let lastVelocityCommand: VelocityCommand = { linear: 0, angular: 0 }
   let manualSessionId: string | null = null
   let manualSessionSequence = 0
+
+  if (typeof window !== 'undefined') {
+    window.addEventListener('turtlebot_bridge_url_change', (e: Event) => {
+      const detail = (e as CustomEvent).detail
+      if (detail?.url && detail.url !== currentUrl) {
+        currentUrl = detail.url
+        if (isSubscribed) {
+          disconnectWebSocket()
+          connectWebSocket()
+        }
+      }
+    })
+  }
 
   // Navigation state
   let navInfo: NavigationInfo = {
@@ -510,7 +540,7 @@ export function createRosRobotDataSource(options: RosRobotDataSourceOptions = {}
 
     const generation = ++socketGeneration
     try {
-      const socket = new WebSocket(url)
+      const socket = new WebSocket(currentUrl)
       ws = socket
 
       socket.onopen = () => {
@@ -983,6 +1013,16 @@ export function createRosRobotDataSource(options: RosRobotDataSourceOptions = {}
       if (current) listener(current)
       return () => {
         mapListeners.delete(listener)
+      }
+    },
+    getBridgeUrl: () => currentUrl,
+    setBridgeUrl: (newUrl: string) => {
+      if (!newUrl || newUrl === currentUrl) return
+      currentUrl = newUrl
+      setStoredBridgeUrl(newUrl)
+      if (isSubscribed) {
+        disconnectWebSocket()
+        connectWebSocket()
       }
     },
   }

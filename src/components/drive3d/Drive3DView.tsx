@@ -21,11 +21,11 @@ export interface Drive3DViewProps {
 
 function createEmptyOccupancyGrid(): import('../../types/robot').OccupancyGrid {
   return {
-    widthCells: 60,
-    heightCells: 40,
-    resolutionM: 0.12,
-    origin: { x: -3.6, y: -2.4 },
-    cells: new Array(60 * 40).fill('unknown'),
+    widthCells: 0,
+    heightCells: 0,
+    resolutionM: 0.1,
+    origin: { x: 0, y: 0 },
+    cells: [],
   }
 }
 
@@ -76,13 +76,7 @@ export function Drive3DView({
   // P1: Stable empty occupancy grid reference - create once, not per frame
   const emptyGridRef = useRef<OccupancyGrid>(null as unknown as OccupancyGrid)
   if (!emptyGridRef.current) {
-    emptyGridRef.current = {
-      widthCells: 60,
-      heightCells: 40,
-      resolutionM: 0.12,
-      origin: { x: -3.6, y: -2.4 },
-      cells: new Array(60 * 40).fill('unknown'),
-    }
+    emptyGridRef.current = createEmptyOccupancyGrid()
   }
 
   // Update awaitingLiveMap state when sourceStatus or liveOccupancyGrid changes
@@ -153,7 +147,8 @@ export function Drive3DView({
       const isLiveSource = sourceStatusRef.current === 'LIVE'
       const initialGrid = liveOccupancyGridRef.current ?? (isLiveSource ? createEmptyOccupancyGrid() : demoOccupancyGrid)
       let activeGrid = initialGrid
-      const environment = createSceneEnvironment(initialGrid)
+      let activeIsLive = isLiveSource
+      const environment = createSceneEnvironment(initialGrid, isLiveSource)
       scene.add(environment.root)
 
       // Set initial route & goal if in autonomous mode
@@ -208,11 +203,12 @@ export function Drive3DView({
         const isLiveSource = sourceStatusRef.current === 'LIVE'
         const expl = explorationRef.current
 
-        // Dynamically update 3D obstacles if live SLAM occupancy grid updates
+        // Dynamically update 3D obstacles and real-time designated boundary
         const currentGrid = liveOccupancyGridRef.current ?? (isLiveSource ? emptyGridRef.current : demoOccupancyGrid)
-        if (currentGrid !== activeGrid) {
+        if (currentGrid !== activeGrid || isLiveSource !== activeIsLive) {
           activeGrid = currentGrid
-          environment.updateMapGrid(currentGrid)
+          activeIsLive = isLiveSource
+          environment.updateMapGrid(currentGrid, isLiveSource)
         }
 
         // A. Advance smooth kinematics.
