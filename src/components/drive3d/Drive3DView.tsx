@@ -180,6 +180,18 @@ export function Drive3DView({
       resizeObserver.observe(container)
       cleanupFns.push(() => resizeObserver.disconnect())
 
+      // Direct real-time map synchronization: updates boundary and obstacles with zero frame lag
+      const onMapUpdated = (e: Event) => {
+        const detail = (e as CustomEvent).detail
+        if (detail) {
+          liveOccupancyGridRef.current = detail
+          activeGrid = detail
+          environment.updateMapGrid(detail, sourceStatusRef.current === 'LIVE')
+        }
+      }
+      window.addEventListener('turtlebot_map_updated', onMapUpdated)
+      cleanupFns.push(() => window.removeEventListener('turtlebot_map_updated', onMapUpdated))
+
       // 9. Continuous 60+ FPS Render Loop
       let lastTime = performance.now()
       let lastSpeedUpdate = 0

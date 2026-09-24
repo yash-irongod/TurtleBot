@@ -517,6 +517,9 @@ export function createRosRobotDataSource(options: RosRobotDataSourceOptions = {}
   const notifyMap = (nextMap: OccupancyGrid | null) => {
     liveMap = nextMap
     mapListeners.forEach((listener) => listener(nextMap))
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('turtlebot_map_updated', { detail: nextMap }))
+    }
   }
 
   const clearReconnect = () => {
@@ -561,8 +564,19 @@ export function createRosRobotDataSource(options: RosRobotDataSourceOptions = {}
           if (!raw || typeof raw !== 'object') return
           const msgType = raw.type
 
-          if (msgType === 'map' && raw.map) {
-            const grid = convertRosOccupancyGridToFrontend(raw.map as RosOccupancyGridPayload)
+          const isMapMsg =
+            msgType === 'map' ||
+            msgType === 'occupancy_grid' ||
+            raw.topic === '/map' ||
+            raw.topic === '/explore/optimized_map'
+          const rawMapData =
+            raw.map ??
+            raw.grid ??
+            (raw.data && typeof raw.data === 'object' && raw.data.width ? raw.data : null) ??
+            (raw.width && raw.data ? raw : null)
+
+          if (isMapMsg && rawMapData) {
+            const grid = convertRosOccupancyGridToFrontend(rawMapData as RosOccupancyGridPayload)
             notifyMap(grid)
             return
           }
@@ -867,6 +881,11 @@ export function createRosRobotDataSource(options: RosRobotDataSourceOptions = {}
       if (status !== 'LIVE' || !ws || ws.readyState !== WebSocket.OPEN) return
       notifyExploration({ ...explorationInfo, state: 'STARTING' })
       try {
+        if (manualSessionId !== null) {
+          sendVelocityPayload(ws, { linear: 0, angular: 0 }, manualSessionId, false)
+          manualSessionId = null
+          clearManualHeartbeat()
+        }
         ws.send(JSON.stringify({ type: 'explore_start' }))
       } catch (err) {
         notifyExploration({ ...explorationInfo, state: 'ERROR' })
