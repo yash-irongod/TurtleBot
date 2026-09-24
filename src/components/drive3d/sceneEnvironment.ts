@@ -19,6 +19,7 @@ import { DEMO_OBSTACLE_ITEMS } from '../../data/mapGrid'
 export interface DesignatedBoundaryManager {
   group: THREE.Group
   update: (dtSec: number, pulseTime: number) => void
+  updateFromLidar?: (points: LidarPoint[], robotPos: Position2D, headingDeg: number) => void
   rebuildFromGrid: (grid: OccupancyGrid, isLive: boolean) => void
   dispose: () => void
 }
@@ -28,6 +29,8 @@ function createDesignatedBoundaryManager(): DesignatedBoundaryManager {
   group.name = 'RealTime_Designated_Boundary_Forcefield'
 
   const shieldHeight = 0.35 // Proportionate height (Burger height is 0.19m)
+  let hasSlamMap = false
+  let lastLidarUpdateAt = 0
 
   // 1. Crystal-Clear Holographic Energy Texture Canvas
   const canvas = document.createElement('canvas')
@@ -102,6 +105,13 @@ function createDesignatedBoundaryManager(): DesignatedBoundaryManager {
     blending: THREE.AdditiveBlending,
   })
 
+  const hazardMat = new THREE.LineBasicMaterial({
+    color: 0xf59e0b,
+    transparent: true,
+    opacity: 0.65,
+    blending: THREE.AdditiveBlending,
+  })
+
   // Shared corner pylon geometry
   const pylonBaseGeo = new THREE.CylinderGeometry(0.030, 0.040, 0.04, 16)
   const pylonBaseMat = new THREE.MeshStandardMaterial({ color: 0x181524, roughness: 0.4, metalness: 0.85 })
@@ -116,6 +126,7 @@ function createDesignatedBoundaryManager(): DesignatedBoundaryManager {
   })
 
   let activeCrystals: THREE.Mesh[] = []
+  let lidarBoundaryGroup: THREE.Group | null = null
 
   const createPylon = (x: number, z: number): THREE.Group => {
     const pylon = new THREE.Group()
@@ -149,13 +160,14 @@ function createDesignatedBoundaryManager(): DesignatedBoundaryManager {
         child.geometry?.dispose()
       } else if (child instanceof THREE.Group) {
         child.traverse((sub) => {
-          if (sub instanceof THREE.Mesh || sub instanceof THREE.LineSegments || sub instanceof THREE.Line) {
+          if (sub instanceof THREE.Mesh || sub instanceof THREE.LineSegments || sub instanceof THREE.Line || sub instanceof THREE.LineLoop) {
             sub.geometry?.dispose()
           }
         })
       }
     }
     activeCrystals = []
+    lidarBoundaryGroup = null
   }
 
   const buildAwaitingBoundary = () => {
@@ -194,6 +206,7 @@ function createDesignatedBoundaryManager(): DesignatedBoundaryManager {
     clearDynamicChildren()
 
     if (!isLive) {
+      hasSlamMap = false
       // DEMO mode: Build the 4 designated boundary walls around the demo arena
       const halfWidth = 3.5
       const halfDepth = 2.3
@@ -258,7 +271,7 @@ function createDesignatedBoundaryManager(): DesignatedBoundaryManager {
     const cells = grid.cells
 
     if (w <= 0 || h <= 0 || !cells || cells.length === 0) {
-      // Awaiting real-time live map from ROS
+      hasSlamMap = false
       buildAwaitingBoundary()
       return
     }
@@ -273,52 +286,146 @@ function createDesignatedBoundaryManager(): DesignatedBoundaryManager {
     }
 
     if (!hasOccupied) {
-      // Map has arrived but no walls mapped yet - show subtle designated radar boundary
+      hasSlamMap = false
       buildAwaitingBoundary()
       return
     }
 
-    // Extract all boundary faces between occupied and non-occupied cells
-    const horizMap = new Map<number, Array<{ x1: number; x2: number }>>()
-    const vertMap = new Map<number, Array<{ z1: number; z2: number }>>()
-
-    const isOcc = (c: number, r: number) => {
-      if (c < 0 || c >= w || r < 0 || r >= h) return false
-      return cells[r * w + c] === 'occupied'
-    }
+    // 1. Cluster all occupied cells using BFS to separate Outer Perimeter Walls from Interior Objects
+    const visited = new Uint8Array(w * h)
+    const perimeterCellSet = new Set<number>()
+    const interiorObstacles: Array<{ cx: number; cz: number; wX: number; wZ: number }> = []
 
     for (let r = 0; r < h; r++) {
       for (let c = 0; c < w; c++) {
-        if (!isOcc(c, r)) continue
-        const wx = origin.x + c * res
-        const wz = origin.y + r * res
+        const idx = r * w + c
+        if (cells[idx] !== 'occupied' || visited[idx]) continue
 
-        // North edge (z)
-        if (!isOcc(c, r - 1)) {
-          const k = Math.round(wz * 1000)
-          if (!horizMap.has(k)) horizMap.set(k, [])
-          horizMap.get(k)!.push({ x1: wx, x2: wx + res })
+        // Start BFS flood-fill for this cluster
+        visited[idx] = 1
+        const queue = [idx]
+        const clusterIndices = [idx]
+        let minC = c
+        let maxC = c
+        let minR = r
+        let maxR = r
+        let touchesUnknown = false
+
+        while (queue.length > 0) {
+          const curr = queue.shift()!
+          const currC = curr % w
+          const currR = Math.floor(curr / w)
+
+          // 8-neighborhood search
+          for (let dr = -1; dr <= 1; dr++) {
+            for (let dc = -1; dc <= 1; dc++) {
+              if (dr === 0 && dc === 0) continue
+              const nr = currR + dr
+              const nc = currC + dc
+
+              if (nc < 0 || nc >= w || nr < 0 || nr >= h) {
+                touchesUnknown = true
+                continue
+              }
+
+              const nIdx = nr * w + nc
+              const nState = cells[nIdx]
+
+              if (nState === 'unknown') {
+                touchesUnknown = true
+              } else if (nState === 'occupied' && !visited[nIdx]) {
+                visited[nIdx] = 1
+                queue.push(nIdx)
+                clusterIndices.push(nIdx)
+                minC = Math.min(minC, nc)
+                maxC = Math.max(maxC, nc)
+                minR = Math.min(minR, nr)
+                maxR = Math.max(maxR, nr)
+              }
+            }
+          }
         }
-        // South edge (z + res)
-        if (!isOcc(c, r + 1)) {
-          const k = Math.round((wz + res) * 1000)
-          if (!horizMap.has(k)) horizMap.set(k, [])
-          horizMap.get(k)!.push({ x1: wx, x2: wx + res })
-        }
-        // West edge (x)
-        if (!isOcc(c - 1, r)) {
-          const k = Math.round(wx * 1000)
-          if (!vertMap.has(k)) vertMap.set(k, [])
-          vertMap.get(k)!.push({ z1: wz, z2: wz + res })
-        }
-        // East edge (x + res)
-        if (!isOcc(c + 1, r)) {
-          const k = Math.round((wx + res) * 1000)
-          if (!vertMap.has(k)) vertMap.set(k, [])
-          vertMap.get(k)!.push({ z1: wz, z2: wz + res })
+
+        const spanX = (maxC - minC + 1) * res
+        const spanZ = (maxR - minR + 1) * res
+
+        // An Interior Object is small (< 0.7m in both dims) and does NOT touch unknown space.
+        // It is an obstacle inside the room, NOT an arena perimeter wall!
+        const isInteriorObject = spanX < 0.70 && spanZ < 0.70 && !touchesUnknown
+
+        if (isInteriorObject) {
+          const cx = origin.x + (minC + maxC + 1) * 0.5 * res
+          const cz = origin.y + (minR + maxR + 1) * 0.5 * res
+          interiorObstacles.push({
+            cx,
+            cz,
+            wX: Math.max(res * 1.5, spanX),
+            wZ: Math.max(res * 1.5, spanZ),
+          })
+        } else {
+          // Perimeter wall or large room partition
+          for (const cIdx of clusterIndices) {
+            perimeterCellSet.add(cIdx)
+          }
         }
       }
     }
+
+    // 2. Render low-profile hazard ground footprints for Interior Objects (NO forcefield wall / NO crystals!)
+    interiorObstacles.forEach(({ cx, cz, wX, wZ }) => {
+      const halfX = wX * 0.5
+      const halfZ = wZ * 0.5
+      const footPts = [
+        new THREE.Vector3(cx - halfX, 0.02, cz - halfZ),
+        new THREE.Vector3(cx + halfX, 0.02, cz - halfZ),
+        new THREE.Vector3(cx + halfX, 0.02, cz + halfZ),
+        new THREE.Vector3(cx - halfX, 0.02, cz + halfZ),
+      ]
+      const loopGeo = new THREE.BufferGeometry().setFromPoints(footPts)
+      const loop = new THREE.LineLoop(loopGeo, hazardMat)
+      group.add(loop)
+    })
+
+    // 3. Extract boundary edges ONLY for perimeter wall cells that face free space (room interior)
+    const horizMap = new Map<number, Array<{ x1: number; x2: number }>>()
+    const vertMap = new Map<number, Array<{ z1: number; z2: number }>>()
+
+    const isFreeCell = (c: number, r: number) => {
+      if (c < 0 || c >= w || r < 0 || r >= h) return false
+      return cells[r * w + c] === 'free'
+    }
+
+    perimeterCellSet.forEach((idx) => {
+      const c = idx % w
+      const r = Math.floor(idx / w)
+      const wx = origin.x + c * res
+      const wz = origin.y + r * res
+
+      // North edge (z) facing free space
+      if (isFreeCell(c, r - 1)) {
+        const k = Math.round(wz * 1000)
+        if (!horizMap.has(k)) horizMap.set(k, [])
+        horizMap.get(k)!.push({ x1: wx, x2: wx + res })
+      }
+      // South edge (z + res) facing free space
+      if (isFreeCell(c, r + 1)) {
+        const k = Math.round((wz + res) * 1000)
+        if (!horizMap.has(k)) horizMap.set(k, [])
+        horizMap.get(k)!.push({ x1: wx, x2: wx + res })
+      }
+      // West edge (x) facing free space
+      if (isFreeCell(c - 1, r)) {
+        const k = Math.round(wx * 1000)
+        if (!vertMap.has(k)) vertMap.set(k, [])
+        vertMap.get(k)!.push({ z1: wz, z2: wz + res })
+      }
+      // East edge (x + res) facing free space
+      if (isFreeCell(c + 1, r)) {
+        const k = Math.round((wx + res) * 1000)
+        if (!vertMap.has(k)) vertMap.set(k, [])
+        vertMap.get(k)!.push({ z1: wz, z2: wz + res })
+      }
+    })
 
     interface WallSegment {
       x1: number
@@ -339,7 +446,7 @@ function createDesignatedBoundaryManager(): DesignatedBoundaryManager {
           current.x2 = Math.max(current.x2, next.x2)
         } else {
           const len = current.x2 - current.x1
-          if (len >= res * 0.5) {
+          if (len >= Math.max(0.20, res * 1.5)) {
             segments.push({ x1: current.x1, z1: z, x2: current.x2, z2: z, len })
           }
           current = next
@@ -347,7 +454,7 @@ function createDesignatedBoundaryManager(): DesignatedBoundaryManager {
       }
       if (current) {
         const len = current.x2 - current.x1
-        if (len >= res * 0.5) {
+        if (len >= Math.max(0.20, res * 1.5)) {
           segments.push({ x1: current.x1, z1: z, x2: current.x2, z2: z, len })
         }
       }
@@ -363,7 +470,7 @@ function createDesignatedBoundaryManager(): DesignatedBoundaryManager {
           current.z2 = Math.max(current.z2, next.z2)
         } else {
           const len = current.z2 - current.z1
-          if (len >= res * 0.5) {
+          if (len >= Math.max(0.20, res * 1.5)) {
             segments.push({ x1: x, z1: current.z1, x2: x, z2: current.z2, len })
           }
           current = next
@@ -371,18 +478,21 @@ function createDesignatedBoundaryManager(): DesignatedBoundaryManager {
       }
       if (current) {
         const len = current.z2 - current.z1
-        if (len >= res * 0.5) {
+        if (len >= Math.max(0.20, res * 1.5)) {
           segments.push({ x1: x, z1: current.z1, x2: x, z2: current.z2, len })
         }
       }
     })
 
     if (segments.length === 0) {
+      hasSlamMap = false
       buildAwaitingBoundary()
       return
     }
 
-    // Build unified 3D meshes for all boundary wall segments
+    hasSlamMap = true
+
+    // 4. Build unified 3D meshes for all perimeter wall segments
     const positions: number[] = []
     const uvs: number[] = []
     const indices: number[] = []
@@ -438,29 +548,126 @@ function createDesignatedBoundaryManager(): DesignatedBoundaryManager {
     const footLines = new THREE.LineSegments(footGeo, footingRailMat)
     group.add(footLines)
 
-    // Corner energy pylons: identify corners where perpendicular walls join
-    const cornerSet = new Set<string>()
-    const potentialCorners: Array<[number, number]> = []
+    // 5. Corner energy pylons: identify corners where long perimeter walls join (>= 0.5m each)
+    const longSegments = segments.filter((s) => s.len >= 0.45)
+    const corners: Array<[number, number]> = []
 
-    segments.forEach((s) => {
-      const k1 = `${s.x1.toFixed(2)},${s.z1.toFixed(2)}`
-      const k2 = `${s.x2.toFixed(2)},${s.z2.toFixed(2)}`
-      if (!cornerSet.has(k1)) {
-        cornerSet.add(k1)
-        potentialCorners.push([s.x1, s.z1])
-      }
-      if (!cornerSet.has(k2)) {
-        cornerSet.add(k2)
-        potentialCorners.push([s.x2, s.z2])
-      }
-    })
+    for (let i = 0; i < longSegments.length; i++) {
+      const s1 = longSegments[i]
+      for (let j = i + 1; j < longSegments.length; j++) {
+        const s2 = longSegments[j]
+        // Check if endpoints meet
+        const endpoints1: Array<[number, number]> = [[s1.x1, s1.z1], [s1.x2, s1.z2]]
+        const endpoints2: Array<[number, number]> = [[s2.x1, s2.z1], [s2.x2, s2.z2]]
 
-    // Place pylons at up to 24 major corner points
-    const step = Math.max(1, Math.floor(potentialCorners.length / 24))
-    for (let i = 0; i < potentialCorners.length && activeCrystals.length < 24; i += step) {
-      const [cx, cz] = potentialCorners[i]
-      group.add(createPylon(cx, cz))
+        for (const [p1x, p1z] of endpoints1) {
+          for (const [p2x, p2z] of endpoints2) {
+            const dist = Math.hypot(p1x - p2x, p1z - p2z)
+            if (dist < res * 1.5) {
+              const cx = (p1x + p2x) * 0.5
+              const cz = (p1z + p2z) * 0.5
+              // Minimum distance to any existing placed corner (>= 1.0m)
+              const tooClose = corners.some(([ex, ez]) => Math.hypot(cx - ex, cz - ez) < 1.0)
+              if (!tooClose && corners.length < 12) {
+                corners.push([cx, cz])
+              }
+            }
+          }
+        }
+      }
     }
+
+    corners.forEach(([cx, cz]) => {
+      group.add(createPylon(cx, cz))
+    })
+  }
+
+  /**
+   * Real-Time LiDAR Dynamic Boundary:
+   * When live SLAM /map is not yet publishing, dynamically constructs the real-time operational
+   * boundary directly from the active 360° LiDAR stream. Zero lag, simultaneous updates at full frame rate!
+   */
+  const updateFromLidar = (points: LidarPoint[], robotPos: Position2D, headingDeg: number) => {
+    // If global SLAM map is active with occupied cells, SLAM is authoritative
+    if (hasSlamMap || !points || points.length < 16) return
+
+    const now = performance.now()
+    if (now - lastLidarUpdateAt < 100) return // Throttle rebuild to ~10 Hz
+    lastLidarUpdateAt = now
+
+    // Remove previous dynamic LiDAR boundary
+    if (lidarBoundaryGroup) {
+      group.remove(lidarBoundaryGroup)
+      lidarBoundaryGroup.traverse((obj) => {
+        if (obj instanceof THREE.Mesh || obj instanceof THREE.LineSegments || obj instanceof THREE.Line || obj instanceof THREE.LineLoop) {
+          obj.geometry?.dispose()
+        }
+      })
+      lidarBoundaryGroup = null
+    }
+
+    const headingRad = (headingDeg * Math.PI) / 180
+    const sectorCount = 32
+    const maxRanges = new Float32Array(sectorCount).fill(0)
+    const sectorAngles = new Float32Array(sectorCount)
+
+    for (let s = 0; s < sectorCount; s++) {
+      sectorAngles[s] = (s / sectorCount) * Math.PI * 2
+    }
+
+    for (let i = 0; i < points.length; i++) {
+      const pt = points[i]
+      if (pt.distanceM < 0.35 || pt.distanceM > 4.5) continue
+      const ptAngleRad = (pt.angleDeg * Math.PI) / 180
+      const totalAngle = (headingRad + ptAngleRad) % (Math.PI * 2)
+      const normAngle = totalAngle < 0 ? totalAngle + Math.PI * 2 : totalAngle
+      const sector = Math.floor((normAngle / (Math.PI * 2)) * sectorCount) % sectorCount
+
+      if (pt.distanceM > maxRanges[sector]) {
+        maxRanges[sector] = pt.distanceM
+      }
+    }
+
+    const ringPts: THREE.Vector3[] = []
+    const topPts: THREE.Vector3[] = []
+    let validCount = 0
+
+    for (let s = 0; s < sectorCount; s++) {
+      const dist = maxRanges[s] || 1.4
+      if (maxRanges[s] > 0) validCount++
+      const a = sectorAngles[s]
+      const wx = robotPos.x + Math.sin(a) * dist
+      const wz = robotPos.y - Math.cos(a) * dist
+      ringPts.push(new THREE.Vector3(wx, 0.01, wz))
+      topPts.push(new THREE.Vector3(wx, shieldHeight, wz))
+    }
+
+    if (validCount < 8) return
+
+    lidarBoundaryGroup = new THREE.Group()
+    lidarBoundaryGroup.name = 'RealTime_LiDAR_Dynamic_Boundary'
+
+    // Footing loop
+    const footGeo = new THREE.BufferGeometry().setFromPoints(ringPts)
+    const footLoop = new THREE.LineLoop(footGeo, footingRailMat)
+    lidarBoundaryGroup.add(footLoop)
+
+    // Top containment laser loop
+    const topGeo = new THREE.BufferGeometry().setFromPoints(topPts)
+    const topLoop = new THREE.LineLoop(topGeo, topRailMat)
+    lidarBoundaryGroup.add(topLoop)
+
+    // Vertical boundary laser struts (every 4 sectors)
+    const strutPositions: number[] = []
+    for (let s = 0; s < sectorCount; s += 4) {
+      strutPositions.push(ringPts[s].x, ringPts[s].y, ringPts[s].z, topPts[s].x, topPts[s].y, topPts[s].z)
+    }
+    const strutGeo = new THREE.BufferGeometry()
+    strutGeo.setAttribute('position', new THREE.Float32BufferAttribute(strutPositions, 3))
+    const struts = new THREE.LineSegments(strutGeo, awaitingMat)
+    lidarBoundaryGroup.add(struts)
+
+    group.add(lidarBoundaryGroup)
   }
 
   const update = (dtSec: number, pulseTime: number) => {
@@ -481,6 +688,7 @@ function createDesignatedBoundaryManager(): DesignatedBoundaryManager {
     topRailMat.dispose()
     footingRailMat.dispose()
     awaitingMat.dispose()
+    hazardMat.dispose()
     pylonBaseMat.dispose()
     pylonRodMat.dispose()
     crystalMat.dispose()
@@ -491,8 +699,9 @@ function createDesignatedBoundaryManager(): DesignatedBoundaryManager {
 
   return {
     group,
-    rebuildFromGrid,
     update,
+    updateFromLidar,
+    rebuildFromGrid,
     dispose,
   }
 }
@@ -1625,8 +1834,9 @@ export function createSceneEnvironment(grid: OccupancyGrid, isLive = false): Sce
   const lidarPointsCloud = new THREE.Points(lidarGeo, lidarPointMat)
   lidarPointsCloud.visible = false
 
-  // 8. LiDAR Updater: updates real-time live obstacle detection
+  // 8. LiDAR Updater: updates real-time live obstacle detection & dynamic boundary
   const updateLidarPoints = (points: LidarPoint[], robotPos: Position2D, headingDeg: number) => {
+    boundaryManager.updateFromLidar?.(points, robotPos, headingDeg)
     obstacleManager.updateLiveObstaclesFromLidar(points, robotPos, headingDeg)
   }
 

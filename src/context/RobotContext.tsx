@@ -510,10 +510,11 @@ const setGoalAt = useCallback(
     // can control the physical robot.
     if (sourceStatus !== 'LIVE') return
     if (typeof dataSource.navigation?.startExploration !== 'function') return
-    if (motionOwner !== 'NONE' && motionOwner !== 'EXPLORATION') return
+    clearVelocityIntent('keyboard')
+    clearVelocityIntent('manual-pad')
     setMotionOwner('EXPLORATION')
     dataSource.navigation.startExploration()
-  }, [dataSource, emergencyStopped, sourceStatus, motionOwner])
+  }, [clearVelocityIntent, dataSource, emergencyStopped, sourceStatus])
 
   const stopExploration = useCallback(() => {
     // LIVE EXPLORATION retains ownership through STOPPING; the backend releases it
@@ -610,7 +611,7 @@ const setGoalAt = useCallback(
   }, [sourceStatus, motionOwner, navigation.navigationState, exploration.state, setMotionOwner])
 
   useEffect(() => {
-    const haltForLifecycle = () => {
+    const haltForUnload = () => {
       stopMotion()
       if (sourceStatus === 'DEMO') {
         demoNavigation.pauseNavigation()
@@ -621,15 +622,16 @@ const setGoalAt = useCallback(
       }
     }
     const handleVisibilityChange = () => {
-      if (document.visibilityState === 'hidden') haltForLifecycle()
+      // Clear manual drive keys when tab is hidden so robot does not run away
+      if (document.visibilityState === 'hidden') {
+        stopMotion()
+      }
     }
 
-    window.addEventListener('blur', haltForLifecycle)
-    window.addEventListener('pagehide', haltForLifecycle)
+    window.addEventListener('pagehide', haltForUnload)
     document.addEventListener('visibilitychange', handleVisibilityChange)
     return () => {
-      window.removeEventListener('blur', haltForLifecycle)
-      window.removeEventListener('pagehide', haltForLifecycle)
+      window.removeEventListener('pagehide', haltForUnload)
       document.removeEventListener('visibilitychange', handleVisibilityChange)
     }
   }, [dataSource, demoNavigation, puppyDemo, sourceStatus, stopMotion])
