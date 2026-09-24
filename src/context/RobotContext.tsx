@@ -19,6 +19,7 @@ import type {
   Waypoint,
 } from '../types/robot'
 import { mockRobotDataSource } from '../data/mockTelemetry'
+import { getStoredBridgeUrl, setStoredBridgeUrl } from '../data/rosRobotDataSource'
 import { useKeyboardDrive } from '../hooks/useKeyboardDrive'
 import { useNavigationDemo } from '../hooks/useNavigationDemo'
 import { usePuppyDemo } from '../hooks/usePuppyDemo'
@@ -133,6 +134,9 @@ interface RobotContextValue {
   /** Live SLAM /map occupancy grid (null if awaiting feed in LIVE mode or in DEMO mode) */
   liveOccupancyGrid: OccupancyGrid | null
 
+  bridgeUrl: string
+  setBridgeUrl: (url: string) => void
+
   puppy: PuppyStatus
   acquireTarget: () => void
   pausePuppy: () => void
@@ -182,6 +186,24 @@ export function RobotProvider({ children, dataSource = mockRobotDataSource }: Ro
   const [emergencyStopped, setEmergencyStopped] = useState(false)
   const [motionOwner, setMotionOwner] = useState<MotionOwner>('NONE')
   const intentRef = useRef<VelocityIntentMap>(emptyVelocityIntents())
+  const [bridgeUrl, setBridgeUrlState] = useState<string>(() => getStoredBridgeUrl())
+
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail
+      if (detail?.url) setBridgeUrlState(detail.url)
+    }
+    window.addEventListener('turtlebot_bridge_url_change', handler)
+    return () => window.removeEventListener('turtlebot_bridge_url_change', handler)
+  }, [])
+
+  const setBridgeUrl = useCallback((newUrl: string) => {
+    setBridgeUrlState(newUrl)
+    setStoredBridgeUrl(newUrl)
+    if (typeof dataSource.setBridgeUrl === 'function') {
+      dataSource.setBridgeUrl(newUrl)
+    }
+  }, [dataSource])
 
   useEffect(() => {
     const initial = dataSource.getInitialTelemetry()
@@ -687,6 +709,8 @@ const setGoalAt = useCallback(
       stopExploration,
 
       liveOccupancyGrid,
+      bridgeUrl,
+      setBridgeUrl,
 
       puppy: puppyDemo.puppy,
       acquireTarget,
@@ -735,6 +759,8 @@ const setGoalAt = useCallback(
       systemPanel,
       telemetry,
       triggerEmergencyStop,
+      bridgeUrl,
+      setBridgeUrl,
     ],
   )
 

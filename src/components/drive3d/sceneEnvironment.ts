@@ -3,26 +3,31 @@ import type { LidarPoint, OccupancyGrid, Position2D } from '../../types/robot'
 import { DEMO_OBSTACLE_ITEMS } from '../../data/mapGrid'
 
 /**
- * Creates the Futuristic Translucent Blue-Purple Containment Forcefield Shield:
- * - Replaces messy obstacle boundaries with an advanced sci-fi energy barrier
- * - 4 vertical perimeter walls enclosing the arena (X: -3.5 to +3.5, Z: -2.3 to +2.3)
- * - Proportionate height (0.35m) so the robot is contained without blocking the horizon
- * - Crystal-clear translucent cyan-blue to neon-violet holographic gradient film
- * - Animated upward scrolling energy scanlines and hexagonal forcefield matrix
- * - Glowing neon top containment rail (cyan/violet dual line) & ground footing seam
- * - 4 Minimalist corner energy emitter nodes with hovering crystals
+ * Real-Time Designated Boundary Manager:
+ * - Constructs our designated high-tech holographic containment barrier in real time.
+ * - In LIVE mode:
+ *   * Dynamically built from the actual ROS OccupancyGrid (/map) in real time.
+ *   * Detects the perimeter walls and room geometry from occupied cells.
+ *   * Merges contiguous wall segments for clean, seamless geometry and peak 60+ FPS performance.
+ *   * Builds translucent holographic wall quads with scrolling energy scanlines.
+ *   * Adds glowing neon additive top laser containment rail and footing glow seam.
+ *   * Instantiates minimalist energy pylon nodes with floating crystals at wall corners.
+ *   * If awaiting live SLAM map stream, shows a sleek awaiting real-time boundary radar ring (no fake static 7x4.6m box!).
+ * - In DEMO mode:
+ *   * Encloses the designated demo arena perimeter (X: -3.5 to +3.5, Z: -2.3 to +2.3).
  */
-function createFuturisticBoundaryShield(): {
+export interface DesignatedBoundaryManager {
   group: THREE.Group
   update: (dtSec: number, pulseTime: number) => void
+  rebuildFromGrid: (grid: OccupancyGrid, isLive: boolean) => void
   dispose: () => void
-} {
-  const group = new THREE.Group()
-  group.name = 'Futuristic_Boundary_Shield_Forcefield'
+}
 
-  const halfWidth = 3.5  // Total width: 7.0m
-  const halfDepth = 2.3  // Total depth: 4.6m
-  const shieldHeight = 0.32 // Proportionate height (Burger height is 0.19m)
+function createDesignatedBoundaryManager(): DesignatedBoundaryManager {
+  const group = new THREE.Group()
+  group.name = 'RealTime_Designated_Boundary_Forcefield'
+
+  const shieldHeight = 0.35 // Proportionate height (Burger height is 0.19m)
 
   // 1. Crystal-Clear Holographic Energy Texture Canvas
   const canvas = document.createElement('canvas')
@@ -31,19 +36,17 @@ function createFuturisticBoundaryShield(): {
   const ctx = canvas.getContext('2d')!
 
   // Soft vertical energy gradient:
-  // Feathered alpha at ground (y=256 in canvas) to seamless crystal cyan/violet in mid-body,
-  // gently brightening to a sleek neon edge at top (y=0 in canvas).
   const grad = ctx.createLinearGradient(0, 256, 0, 0)
-  grad.addColorStop(0.0, 'rgba(0, 210, 255, 0.04)')    // Seamless soft ground contact (no harsh base line)
+  grad.addColorStop(0.0, 'rgba(0, 210, 255, 0.04)')    // Seamless soft ground contact
   grad.addColorStop(0.20, 'rgba(14, 165, 233, 0.16)')   // Electric cyan-blue
   grad.addColorStop(0.60, 'rgba(139, 92, 246, 0.22)')   // Sci-fi violet
   grad.addColorStop(0.88, 'rgba(168, 85, 247, 0.36)')   // Neon purple
-  grad.addColorStop(1.0, 'rgba(216, 180, 254, 0.65)')   // Luminous top rim
+  grad.addColorStop(1.0, 'rgba(216, 180, 254, 0.70)')   // Luminous top rim
   ctx.fillStyle = grad
   ctx.fillRect(0, 0, 512, 256)
 
-  // Delicate hexagonal cyber-matrix (subtle, clean, high-tech)
-  ctx.strokeStyle = 'rgba(192, 132, 252, 0.14)'
+  // Delicate hexagonal cyber-matrix
+  ctx.strokeStyle = 'rgba(192, 132, 252, 0.16)'
   ctx.lineWidth = 1
   const hexR = 20
   const hexH = Math.sqrt(3) * hexR
@@ -69,67 +72,37 @@ function createFuturisticBoundaryShield(): {
   shieldTexture.wrapT = THREE.RepeatWrapping
   shieldTexture.colorSpace = THREE.SRGBColorSpace
 
-  const shieldMaterial = new THREE.MeshBasicMaterial({
+  const wallMaterial = new THREE.MeshBasicMaterial({
     map: shieldTexture,
     transparent: true,
-    opacity: 0.55,
+    opacity: 0.60,
     side: THREE.DoubleSide,
     blending: THREE.NormalBlending,
     depthWrite: false,
   })
 
-  // 4 Perimeter Walls (North, South, East, West) enclosing the arena
-  const wallPlanes: THREE.Mesh[] = []
-  const wallConfigs = [
-    { width: halfWidth * 2, x: 0, z: halfDepth, rotY: 0 },
-    { width: halfWidth * 2, x: 0, z: -halfDepth, rotY: Math.PI },
-    { width: halfDepth * 2, x: halfWidth, z: 0, rotY: Math.PI / 2 },
-    { width: halfDepth * 2, x: -halfWidth, z: 0, rotY: -Math.PI / 2 },
-  ]
-
-  wallConfigs.forEach(({ width, x, z, rotY }) => {
-    const geo = new THREE.PlaneGeometry(width, shieldHeight)
-    geo.translate(0, shieldHeight / 2, 0)
-
-    const wallMat = shieldMaterial.clone()
-    wallMat.map = shieldTexture.clone()
-    wallMat.map.wrapS = THREE.RepeatWrapping
-    wallMat.map.wrapT = THREE.RepeatWrapping
-    wallMat.map.repeat.set(width * 0.8, 1)
-    wallMat.map.needsUpdate = true
-
-    const mesh = new THREE.Mesh(geo, wallMat)
-    mesh.position.set(x, 0, z)
-    mesh.rotation.y = rotY
-    group.add(mesh)
-    wallPlanes.push(mesh)
-  })
-
-  // 2. Single Ultra-Crisp Glowing Neon Top Laser Rail (No double lines or multiple borders)
-  const topPts = [
-    new THREE.Vector3(-halfWidth, shieldHeight, -halfDepth),
-    new THREE.Vector3(halfWidth, shieldHeight, -halfDepth),
-    new THREE.Vector3(halfWidth, shieldHeight, halfDepth),
-    new THREE.Vector3(-halfWidth, shieldHeight, halfDepth),
-  ]
-  const railGeo = new THREE.BufferGeometry().setFromPoints(topPts)
   const topRailMat = new THREE.LineBasicMaterial({
     color: 0x38bdf8,
     transparent: true,
-    opacity: 0.85,
+    opacity: 0.90,
     blending: THREE.AdditiveBlending,
   })
-  const topRail = new THREE.LineLoop(railGeo, topRailMat)
-  group.add(topRail)
 
-  // 3. 4 Minimalist Corner Energy Emitter Pylons
-  const cornerPositions = [
-    [-halfWidth, -halfDepth],
-    [halfWidth, -halfDepth],
-    [halfWidth, halfDepth],
-    [-halfWidth, halfDepth],
-  ]
+  const footingRailMat = new THREE.LineBasicMaterial({
+    color: 0x9333ea,
+    transparent: true,
+    opacity: 0.60,
+    blending: THREE.AdditiveBlending,
+  })
 
+  const awaitingMat = new THREE.LineBasicMaterial({
+    color: 0x38bdf8,
+    transparent: true,
+    opacity: 0.70,
+    blending: THREE.AdditiveBlending,
+  })
+
+  // Shared corner pylon geometry
   const pylonBaseGeo = new THREE.CylinderGeometry(0.030, 0.040, 0.04, 16)
   const pylonBaseMat = new THREE.MeshStandardMaterial({ color: 0x181524, roughness: 0.4, metalness: 0.85 })
   const pylonRodGeo = new THREE.CylinderGeometry(0.006, 0.006, shieldHeight, 12)
@@ -142,11 +115,11 @@ function createFuturisticBoundaryShield(): {
     blending: THREE.AdditiveBlending,
   })
 
-  const crystals: THREE.Mesh[] = []
+  let activeCrystals: THREE.Mesh[] = []
 
-  cornerPositions.forEach(([cx, cz]) => {
+  const createPylon = (x: number, z: number): THREE.Group => {
     const pylon = new THREE.Group()
-    pylon.position.set(cx, 0, cz)
+    pylon.position.set(x, 0, z)
 
     const baseMesh = new THREE.Mesh(pylonBaseGeo, pylonBaseMat)
     baseMesh.position.y = 0.02
@@ -159,26 +132,342 @@ function createFuturisticBoundaryShield(): {
     const crystal = new THREE.Mesh(crystalGeo, crystalMat)
     crystal.position.y = shieldHeight + 0.02
     pylon.add(crystal)
-    crystals.push(crystal)
+    activeCrystals.push(crystal)
 
-    const cornerLight = new THREE.PointLight(0x06b6d4, 0.25, 1.8, 2.0)
+    const cornerLight = new THREE.PointLight(0x06b6d4, 0.20, 1.6, 2.0)
     cornerLight.position.set(0, shieldHeight / 2, 0)
     pylon.add(cornerLight)
 
-    group.add(pylon)
-  })
+    return pylon
+  }
 
-  const update = (dtSec: number, pulseTime: number) => {
-    const wave = Math.sin(pulseTime * 2.0) * 0.04
-    wallPlanes.forEach((mesh) => {
-      const mat = mesh.material as THREE.MeshBasicMaterial
-      if (mat.map) {
-        mat.map.offset.y += dtSec * 0.08
+  const clearDynamicChildren = () => {
+    while (group.children.length > 0) {
+      const child = group.children[0]
+      group.remove(child)
+      if (child instanceof THREE.Mesh || child instanceof THREE.LineSegments || child instanceof THREE.Line || child instanceof THREE.LineLoop) {
+        child.geometry?.dispose()
+      } else if (child instanceof THREE.Group) {
+        child.traverse((sub) => {
+          if (sub instanceof THREE.Mesh || sub instanceof THREE.LineSegments || sub instanceof THREE.Line) {
+            sub.geometry?.dispose()
+          }
+        })
       }
-      mat.opacity = 0.55 + wave
+    }
+    activeCrystals = []
+  }
+
+  const buildAwaitingBoundary = () => {
+    // Subtle holographic radar boundary scan around origin while awaiting SLAM stream
+    const r1 = 1.4
+    const r2 = 0.8
+    const segmentsCount = 36
+    const ringPts: THREE.Vector3[] = []
+    for (let i = 0; i <= segmentsCount; i++) {
+      const a = (i / segmentsCount) * Math.PI * 2
+      ringPts.push(new THREE.Vector3(Math.cos(a) * r1, 0.01, Math.sin(a) * r1))
+    }
+    const r1Geo = new THREE.BufferGeometry().setFromPoints(ringPts)
+    group.add(new THREE.Line(r1Geo, awaitingMat))
+
+    const r2Pts: THREE.Vector3[] = []
+    for (let i = 0; i <= segmentsCount; i++) {
+      const a = (i / segmentsCount) * Math.PI * 2
+      r2Pts.push(new THREE.Vector3(Math.cos(a) * r2, 0.01, Math.sin(a) * r2))
+    }
+    const r2Geo = new THREE.BufferGeometry().setFromPoints(r2Pts)
+    group.add(new THREE.Line(r2Geo, footingRailMat))
+
+    // 4 cardinal tick marks
+    const tickPts: THREE.Vector3[] = [
+      new THREE.Vector3(r1, 0.01, 0), new THREE.Vector3(r1 + 0.25, 0.01, 0),
+      new THREE.Vector3(-r1, 0.01, 0), new THREE.Vector3(-r1 - 0.25, 0.01, 0),
+      new THREE.Vector3(0, 0.01, r1), new THREE.Vector3(0, 0.01, r1 + 0.25),
+      new THREE.Vector3(0, 0.01, -r1), new THREE.Vector3(0, 0.01, -r1 - 0.25),
+    ]
+    const tickGeo = new THREE.BufferGeometry().setFromPoints(tickPts)
+    group.add(new THREE.LineSegments(tickGeo, awaitingMat))
+  }
+
+  const rebuildFromGrid = (grid: OccupancyGrid, isLive: boolean) => {
+    clearDynamicChildren()
+
+    if (!isLive) {
+      // DEMO mode: Build the 4 designated boundary walls around the demo arena
+      const halfWidth = 3.5
+      const halfDepth = 2.3
+
+      const wallConfigs = [
+        { width: halfWidth * 2, x: 0, z: halfDepth, rotY: 0 },
+        { width: halfWidth * 2, x: 0, z: -halfDepth, rotY: Math.PI },
+        { width: halfDepth * 2, x: halfWidth, z: 0, rotY: Math.PI / 2 },
+        { width: halfDepth * 2, x: -halfWidth, z: 0, rotY: -Math.PI / 2 },
+      ]
+
+      wallConfigs.forEach(({ width, x, z, rotY }) => {
+        const geo = new THREE.PlaneGeometry(width, shieldHeight)
+        geo.translate(0, shieldHeight / 2, 0)
+        const mesh = new THREE.Mesh(geo, wallMaterial)
+        mesh.position.set(x, 0, z)
+        mesh.rotation.y = rotY
+        group.add(mesh)
+      })
+
+      // Top glowing neon laser rail loop
+      const topPts = [
+        new THREE.Vector3(-halfWidth, shieldHeight, -halfDepth),
+        new THREE.Vector3(halfWidth, shieldHeight, -halfDepth),
+        new THREE.Vector3(halfWidth, shieldHeight, halfDepth),
+        new THREE.Vector3(-halfWidth, shieldHeight, halfDepth),
+      ]
+      const railGeo = new THREE.BufferGeometry().setFromPoints(topPts)
+      const topRail = new THREE.LineLoop(railGeo, topRailMat)
+      group.add(topRail)
+
+      // Footing rail loop
+      const footPts = [
+        new THREE.Vector3(-halfWidth, 0.005, -halfDepth),
+        new THREE.Vector3(halfWidth, 0.005, -halfDepth),
+        new THREE.Vector3(halfWidth, 0.005, halfDepth),
+        new THREE.Vector3(-halfWidth, 0.005, halfDepth),
+      ]
+      const footGeo = new THREE.BufferGeometry().setFromPoints(footPts)
+      const footRail = new THREE.LineLoop(footGeo, footingRailMat)
+      group.add(footRail)
+
+      // 4 Corner Pylons
+      const corners = [
+        [-halfWidth, -halfDepth],
+        [halfWidth, -halfDepth],
+        [halfWidth, halfDepth],
+        [-halfWidth, halfDepth],
+      ]
+      corners.forEach(([cx, cz]) => {
+        group.add(createPylon(cx, cz))
+      })
+
+      return
+    }
+
+    // LIVE mode: Construct designated boundary in real-time from the real ROS OccupancyGrid!
+    const w = grid.widthCells
+    const h = grid.heightCells
+    const res = grid.resolutionM
+    const origin = grid.origin
+    const cells = grid.cells
+
+    if (w <= 0 || h <= 0 || !cells || cells.length === 0) {
+      // Awaiting real-time live map from ROS
+      buildAwaitingBoundary()
+      return
+    }
+
+    // Check if any occupied cells exist
+    let hasOccupied = false
+    for (let i = 0; i < cells.length; i++) {
+      if (cells[i] === 'occupied') {
+        hasOccupied = true
+        break
+      }
+    }
+
+    if (!hasOccupied) {
+      // Map has arrived but no walls mapped yet - show subtle designated radar boundary
+      buildAwaitingBoundary()
+      return
+    }
+
+    // Extract all boundary faces between occupied and non-occupied cells
+    const horizMap = new Map<number, Array<{ x1: number; x2: number }>>()
+    const vertMap = new Map<number, Array<{ z1: number; z2: number }>>()
+
+    const isOcc = (c: number, r: number) => {
+      if (c < 0 || c >= w || r < 0 || r >= h) return false
+      return cells[r * w + c] === 'occupied'
+    }
+
+    for (let r = 0; r < h; r++) {
+      for (let c = 0; c < w; c++) {
+        if (!isOcc(c, r)) continue
+        const wx = origin.x + c * res
+        const wz = origin.y + r * res
+
+        // North edge (z)
+        if (!isOcc(c, r - 1)) {
+          const k = Math.round(wz * 1000)
+          if (!horizMap.has(k)) horizMap.set(k, [])
+          horizMap.get(k)!.push({ x1: wx, x2: wx + res })
+        }
+        // South edge (z + res)
+        if (!isOcc(c, r + 1)) {
+          const k = Math.round((wz + res) * 1000)
+          if (!horizMap.has(k)) horizMap.set(k, [])
+          horizMap.get(k)!.push({ x1: wx, x2: wx + res })
+        }
+        // West edge (x)
+        if (!isOcc(c - 1, r)) {
+          const k = Math.round(wx * 1000)
+          if (!vertMap.has(k)) vertMap.set(k, [])
+          vertMap.get(k)!.push({ z1: wz, z2: wz + res })
+        }
+        // East edge (x + res)
+        if (!isOcc(c + 1, r)) {
+          const k = Math.round((wx + res) * 1000)
+          if (!vertMap.has(k)) vertMap.set(k, [])
+          vertMap.get(k)!.push({ z1: wz, z2: wz + res })
+        }
+      }
+    }
+
+    interface WallSegment {
+      x1: number
+      z1: number
+      x2: number
+      z2: number
+      len: number
+    }
+    const segments: WallSegment[] = []
+
+    horizMap.forEach((intervals, k) => {
+      const z = k / 1000
+      intervals.sort((a, b) => a.x1 - b.x1)
+      let current = intervals[0]
+      for (let i = 1; i < intervals.length; i++) {
+        const next = intervals[i]
+        if (next.x1 <= current.x2 + res * 0.4) {
+          current.x2 = Math.max(current.x2, next.x2)
+        } else {
+          const len = current.x2 - current.x1
+          if (len >= res * 0.5) {
+            segments.push({ x1: current.x1, z1: z, x2: current.x2, z2: z, len })
+          }
+          current = next
+        }
+      }
+      if (current) {
+        const len = current.x2 - current.x1
+        if (len >= res * 0.5) {
+          segments.push({ x1: current.x1, z1: z, x2: current.x2, z2: z, len })
+        }
+      }
     })
 
-    crystals.forEach((crystal, idx) => {
+    vertMap.forEach((intervals, k) => {
+      const x = k / 1000
+      intervals.sort((a, b) => a.z1 - b.z1)
+      let current = intervals[0]
+      for (let i = 1; i < intervals.length; i++) {
+        const next = intervals[i]
+        if (next.z1 <= current.z2 + res * 0.4) {
+          current.z2 = Math.max(current.z2, next.z2)
+        } else {
+          const len = current.z2 - current.z1
+          if (len >= res * 0.5) {
+            segments.push({ x1: x, z1: current.z1, x2: x, z2: current.z2, len })
+          }
+          current = next
+        }
+      }
+      if (current) {
+        const len = current.z2 - current.z1
+        if (len >= res * 0.5) {
+          segments.push({ x1: x, z1: current.z1, x2: x, z2: current.z2, len })
+        }
+      }
+    })
+
+    if (segments.length === 0) {
+      buildAwaitingBoundary()
+      return
+    }
+
+    // Build unified 3D meshes for all boundary wall segments
+    const positions: number[] = []
+    const uvs: number[] = []
+    const indices: number[] = []
+    const railPositions: number[] = []
+    const footPositions: number[] = []
+
+    let vertOffset = 0
+    segments.forEach((seg) => {
+      const { x1, z1, x2, z2, len } = seg
+      positions.push(
+        x1, 0, z1,
+        x2, 0, z2,
+        x2, shieldHeight, z2,
+        x1, shieldHeight, z1
+      )
+      const uMax = Math.max(1, len * 1.5)
+      uvs.push(
+        0, 0,
+        uMax, 0,
+        uMax, 1,
+        0, 1
+      )
+      indices.push(
+        vertOffset, vertOffset + 1, vertOffset + 2,
+        vertOffset, vertOffset + 2, vertOffset + 3,
+        vertOffset, vertOffset + 2, vertOffset + 1,
+        vertOffset, vertOffset + 3, vertOffset + 2
+      )
+      vertOffset += 4
+
+      // Top laser rail
+      railPositions.push(x1, shieldHeight, z1, x2, shieldHeight, z2)
+      // Ground footing seam
+      footPositions.push(x1, 0.005, z1, x2, 0.005, z2)
+    })
+
+    const wallGeo = new THREE.BufferGeometry()
+    wallGeo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+    wallGeo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2))
+    wallGeo.setIndex(indices)
+    wallGeo.computeVertexNormals()
+
+    const wallMesh = new THREE.Mesh(wallGeo, wallMaterial)
+    group.add(wallMesh)
+
+    const railGeo = new THREE.BufferGeometry()
+    railGeo.setAttribute('position', new THREE.Float32BufferAttribute(railPositions, 3))
+    const railLines = new THREE.LineSegments(railGeo, topRailMat)
+    group.add(railLines)
+
+    const footGeo = new THREE.BufferGeometry()
+    footGeo.setAttribute('position', new THREE.Float32BufferAttribute(footPositions, 3))
+    const footLines = new THREE.LineSegments(footGeo, footingRailMat)
+    group.add(footLines)
+
+    // Corner energy pylons: identify corners where perpendicular walls join
+    const cornerSet = new Set<string>()
+    const potentialCorners: Array<[number, number]> = []
+
+    segments.forEach((s) => {
+      const k1 = `${s.x1.toFixed(2)},${s.z1.toFixed(2)}`
+      const k2 = `${s.x2.toFixed(2)},${s.z2.toFixed(2)}`
+      if (!cornerSet.has(k1)) {
+        cornerSet.add(k1)
+        potentialCorners.push([s.x1, s.z1])
+      }
+      if (!cornerSet.has(k2)) {
+        cornerSet.add(k2)
+        potentialCorners.push([s.x2, s.z2])
+      }
+    })
+
+    // Place pylons at up to 24 major corner points
+    const step = Math.max(1, Math.floor(potentialCorners.length / 24))
+    for (let i = 0; i < potentialCorners.length && activeCrystals.length < 24; i += step) {
+      const [cx, cz] = potentialCorners[i]
+      group.add(createPylon(cx, cz))
+    }
+  }
+
+  const update = (dtSec: number, pulseTime: number) => {
+    shieldTexture.offset.y += dtSec * 0.08
+    wallMaterial.opacity = 0.58 + Math.sin(pulseTime * 2.0) * 0.06
+
+    activeCrystals.forEach((crystal, idx) => {
       crystal.rotation.y += dtSec * 1.5
       crystal.rotation.x = Math.sin(pulseTime * 2.0 + idx) * 0.12
       crystal.position.y = shieldHeight + 0.02 + Math.sin(pulseTime * 2.5 + idx) * 0.005
@@ -186,25 +475,23 @@ function createFuturisticBoundaryShield(): {
   }
 
   const dispose = () => {
-    group.traverse((obj) => {
-      if (obj instanceof THREE.Mesh || obj instanceof THREE.LineLoop || obj instanceof THREE.Line) {
-        obj.geometry?.dispose()
-        if (Array.isArray(obj.material)) {
-          obj.material.forEach((m) => {
-            if ('map' in m && m.map) (m.map as THREE.Texture).dispose()
-            m.dispose()
-          })
-        } else {
-          if ('map' in obj.material && obj.material.map) (obj.material.map as THREE.Texture).dispose()
-          obj.material?.dispose()
-        }
-      }
-    })
+    clearDynamicChildren()
     shieldTexture.dispose()
+    wallMaterial.dispose()
+    topRailMat.dispose()
+    footingRailMat.dispose()
+    awaitingMat.dispose()
+    pylonBaseMat.dispose()
+    pylonRodMat.dispose()
+    crystalMat.dispose()
+    pylonBaseGeo.dispose()
+    pylonRodGeo.dispose()
+    crystalGeo.dispose()
   }
 
   return {
     group,
+    rebuildFromGrid,
     update,
     dispose,
   }
@@ -223,7 +510,7 @@ export interface SceneEnvironment {
   setGoalPosition: (pos: Position2D | null) => void
   setFrontierTarget: (pos: Position2D | null) => void
   setRoutePath: (path: Position2D[]) => void
-  updateMapGrid: (grid: OccupancyGrid) => void
+  updateMapGrid: (grid: OccupancyGrid, isLive?: boolean) => void
   updateLidarPoints: (points: LidarPoint[], robotPos: Position2D, headingDeg: number) => void
   update: (dtSec: number, robotPos: Position2D, linearVel: number, cameraPos?: THREE.Vector3) => void
   dispose: () => void
@@ -955,215 +1242,51 @@ function createRealTimeObstacleManager(loader: THREE.TextureLoader) {
     return group
   }
 
-  /** 5. Solid Concrete Jersey Barrier / Wall Block */
-  const createSolidConcreteBarrier = (
-    x: number,
-    z: number,
-    length = 0.55,
-    height = 0.16,
-    width = 0.22,
-    angle = 0,
-  ): THREE.Group => {
-    const group = new THREE.Group()
-    group.position.set(x, height / 2, z)
-    group.rotation.y = angle
-
-    const geo = new THREE.BoxGeometry(length, height, width)
-    const mesh = new THREE.Mesh(geo, slabMat)
-    mesh.castShadow = true
-    mesh.receiveShadow = true
-    group.add(mesh)
-
-    return group
-  }
-
   // Set of instantiated live obstacle positions in world space (to avoid duplicate meshes)
   const liveObstacleKeys = new Set<string>()
 
   /**
-   * Builds the clean, sparse disaster arena obstacles.
+   * Builds the clean, sparse disaster arena obstacles for DEMO mode.
+   * In LIVE mode, occupied cells and walls from ROS are constructed directly
+   * as the real-time designated boundary — never converted into random objects (cones, drums, pipes, slabs)!
    */
-  const buildMappedObstacles = (grid: OccupancyGrid) => {
+  const buildMappedObstacles = (_grid: OccupancyGrid, isLive = false) => {
     while (rootGroup.children.length > 0) {
       const child = rootGroup.children[0]
       rootGroup.remove(child)
     }
     liveObstacleKeys.clear()
 
-    // Check if this is the demo grid (or demo mode)
-    const isDemo = grid.widthCells === 60 && grid.heightCells === 40
-
-    if (isDemo) {
-      // Build exactly the clean, sparse disaster items requested by user
-      for (const item of DEMO_OBSTACLE_ITEMS) {
-        let obj: THREE.Group
-        if (item.type === 'fallen_drum') {
-          obj = createFallenDrum(item.x, item.y, 0.5, 0.22)
-        } else if (item.type === 'slab') {
-          obj = createSlabWithRebar(item.x, item.y, 0.44, 0.13, 0.30, item.id === 'obs-slab-1' ? 0.35 : -0.5)
-        } else if (item.type === 'cone') {
-          obj = createSafetyConeGroup(item.x, item.y, 0.2)
-        } else if (item.type === 'tilted_pipe') {
-          obj = createTiltedEmergingPipe(item.x, item.y, 0.13, 0.65, 0.52, -0.45)
-        } else {
-          obj = createUprightDrum(item.x, item.y, 0.1, 0.04)
-        }
-        rootGroup.add(obj)
-      }
-
+    // IN LIVE MODE: Never spawn random objects along real walls or mapped space!
+    // The real-time designated boundary manager handles all real room walls and bounds.
+    if (isLive) {
       return
     }
 
-    // LIVE mode: Build solid 3D textured assets from SLAM occupied cells
-    const w = grid.widthCells
-    const h = grid.heightCells
-    const res = grid.resolutionM
-    const visited = new Uint8Array(w * h)
-
-    let totalSpawned = 0
-    const maxObjects = 35
-
-    for (let r = 0; r < h && totalSpawned < maxObjects; r++) {
-      for (let c = 0; c < w && totalSpawned < maxObjects; c++) {
-        const idx = r * w + c
-        if (grid.cells[idx] !== 'occupied' || visited[idx]) continue
-
-        let clusterCount = 0
-        let sumX = 0
-        let sumZ = 0
-        let minC = c
-        let maxC = c
-        let minR = r
-        let maxR = r
-
-        // Flood search local 7x7 neighborhood (~0.35m cluster)
-        for (let dr = -3; dr <= 3; dr++) {
-          for (let dc = -3; dc <= 3; dc++) {
-            const nr = r + dr
-            const nc = c + dc
-            if (nr >= 0 && nr < h && nc >= 0 && nc < w) {
-              const nIdx = nr * w + nc
-              if (grid.cells[nIdx] === 'occupied' && !visited[nIdx]) {
-                visited[nIdx] = 1
-                clusterCount++
-                const wx = grid.origin.x + (nc + 0.5) * res
-                const wz = grid.origin.y + (nr + 0.5) * res
-                sumX += wx
-                sumZ += wz
-                minC = Math.min(minC, nc)
-                maxC = Math.max(maxC, nc)
-                minR = Math.min(minR, nr)
-                maxR = Math.max(maxR, nr)
-              }
-            }
-          }
-        }
-
-        // Filter isolated 1-cell sensor speckle noise
-        if (clusterCount < 2) continue
-
-        const avgX = sumX / clusterCount
-        const avgZ = sumZ / clusterCount
-
-        // Arena boundary is strictly handled by the futuristic translucent shield - never spawn boundary obstacles!
-        if (Math.abs(avgX) >= 2.9 || Math.abs(avgZ) >= 1.8) continue
-
-        const spanX = (maxC - minC + 1) * res
-        const spanZ = (maxR - minR + 1) * res
-        const hash = Math.sin(avgX * 37.1 + avgZ * 91.7) * 43758.5453
-        const seed = Math.abs(hash % 1)
-        const angle = (seed * Math.PI * 2) % Math.PI
-
-        let obj: THREE.Group
-        if (spanX > 0.6 || spanZ > 0.6) {
-          // Elongated interior partition segment: spawn solid concrete barrier block
-          const wallAngle = spanX >= spanZ ? 0 : Math.PI / 2
-          obj = createSolidConcreteBarrier(avgX, avgZ, Math.min(0.65, Math.max(spanX, spanZ)), 0.16, 0.22, wallAngle)
-        } else if (clusterCount >= 6) {
-          if (seed > 0.5) {
-            obj = createSlabWithRebar(avgX, avgZ, 0.44, 0.13, 0.30, angle)
-          } else {
-            obj = createTiltedEmergingPipe(avgX, avgZ, 0.13, 0.65, 0.52, angle)
-          }
-        } else if (clusterCount >= 3) {
-          if (seed > 0.5) {
-            obj = createFallenDrum(avgX, avgZ, angle, seed * 0.3)
-          } else {
-            obj = createUprightDrum(avgX, avgZ, angle, 0.04)
-          }
-        } else {
-          obj = createSafetyConeGroup(avgX, avgZ, angle)
-        }
-
-        rootGroup.add(obj)
-        const key = `${avgX.toFixed(1)},${avgZ.toFixed(1)}`
-        liveObstacleKeys.add(key)
-        totalSpawned++
+    // In DEMO mode: Build the 6 sparse disaster items
+    for (const item of DEMO_OBSTACLE_ITEMS) {
+      let obj: THREE.Group
+      if (item.type === 'fallen_drum') {
+        obj = createFallenDrum(item.x, item.y, 0.5, 0.22)
+      } else if (item.type === 'slab') {
+        obj = createSlabWithRebar(item.x, item.y, 0.44, 0.13, 0.30, item.id === 'obs-slab-1' ? 0.35 : -0.5)
+      } else if (item.type === 'cone') {
+        obj = createSafetyConeGroup(item.x, item.y, 0.2)
+      } else if (item.type === 'tilted_pipe') {
+        obj = createTiltedEmergingPipe(item.x, item.y, 0.13, 0.65, 0.52, -0.45)
+      } else {
+        obj = createUprightDrum(item.x, item.y, 0.1, 0.04)
       }
+      rootGroup.add(obj)
     }
   }
 
   /**
    * Real-time live obstacle detector:
-   * When in LIVE mode and SLAM /map is not yet publishing dense obstacles,
-   * clusters persistent LiDAR returns in world space to instantiate solid 3D textured assets.
+   * In LIVE mode, LiDAR returns must never be replaced by random objects (drums, cones, pipes, etc.).
    */
-  const updateLiveObstaclesFromLidar = (points: LidarPoint[], robotPos: Position2D, headingDeg: number) => {
-    // Only active if no static map obstacles exist yet
-    if (rootGroup.children.length >= 8) return
-
-    const headingRad = (headingDeg * Math.PI) / 180
-    const binCount: Record<string, { count: number; sumX: number; sumZ: number }> = {}
-
-    for (let i = 0; i < points.length; i++) {
-      const pt = points[i]
-      if (pt.distanceM < 0.4 || pt.distanceM > 2.8) continue
-
-      const ptAngleRad = (pt.angleDeg * Math.PI) / 180
-      const totalAngleRad = headingRad + ptAngleRad
-      const wx = robotPos.x + Math.sin(totalAngleRad) * pt.distanceM
-      const wz = robotPos.y - Math.cos(totalAngleRad) * pt.distanceM
-
-      // Never track boundary returns as interior obstacle objects
-      if (Math.abs(wx) >= 2.9 || Math.abs(wz) >= 1.8) continue
-
-      const binKey = `${(Math.round(wx * 2) / 2).toFixed(1)},${(Math.round(wz * 2) / 2).toFixed(1)}`
-      if (!binCount[binKey]) {
-        binCount[binKey] = { count: 0, sumX: 0, sumZ: 0 }
-      }
-      binCount[binKey].count++
-      binCount[binKey].sumX += wx
-      binCount[binKey].sumZ += wz
-    }
-
-    for (const [key, bin] of Object.entries(binCount)) {
-      if (bin.count >= 4 && !liveObstacleKeys.has(key) && rootGroup.children.length < 20) {
-        liveObstacleKeys.add(key)
-        const avgX = bin.sumX / bin.count
-        const avgZ = bin.sumZ / bin.count
-
-        // Boundary safety check
-        if (Math.abs(avgX) >= 2.9 || Math.abs(avgZ) >= 1.8) continue
-
-        const hash = Math.sin(avgX * 43.1 + avgZ * 67.3) * 43758.5453
-        const seed = Math.abs(hash % 1)
-        const angle = (seed * Math.PI * 2) % Math.PI
-
-        let obj: THREE.Group
-        if (seed < 0.3) {
-          obj = createFallenDrum(avgX, avgZ, angle, 0.2)
-        } else if (seed < 0.55) {
-          obj = createSlabWithRebar(avgX, avgZ, 0.44, 0.13, 0.30, angle)
-        } else if (seed < 0.75) {
-          obj = createSafetyConeGroup(avgX, avgZ, angle)
-        } else if (seed < 0.9) {
-          obj = createTiltedEmergingPipe(avgX, avgZ, 0.13, 0.65, 0.52, angle)
-        } else {
-          obj = createUprightDrum(avgX, avgZ, angle, 0.04)
-        }
-        rootGroup.add(obj)
-      }
-    }
+  const updateLiveObstaclesFromLidar = (_points: LidarPoint[], _robotPos: Position2D, _headingDeg: number) => {
+    // Intentionally no-op: prevents replacing real LiDAR returns with an "objects line".
   }
 
   const dispose = () => {
@@ -1206,7 +1329,7 @@ function createRealTimeObstacleManager(loader: THREE.TextureLoader) {
  * - Volcanic atmospheric embers drifting in warm sunset key light
  * - Real-time 360° LiDAR point cloud and proximity warning slices
  */
-export function createSceneEnvironment(grid: OccupancyGrid): SceneEnvironment {
+export function createSceneEnvironment(grid: OccupancyGrid, isLive = false): SceneEnvironment {
   const root = new THREE.Group()
   root.name = 'Disaster_Zone_Scene_Environment'
 
@@ -1220,17 +1343,19 @@ export function createSceneEnvironment(grid: OccupancyGrid): SceneEnvironment {
   const terrain = createDisasterTerrain(loader)
   root.add(terrain)
 
-  // 2.5. Futuristic Boundary Shield - Translucent blue-purple force field perimeter
-  const boundaryShield = createFuturisticBoundaryShield()
-  root.add(boundaryShield.group)
+  // 2.5. Real-Time Designated Boundary Manager (dynamic in LIVE and DEMO)
+  const boundaryManager = createDesignatedBoundaryManager()
+  boundaryManager.rebuildFromGrid(grid, isLive)
+  root.add(boundaryManager.group)
 
-  // 3. Stationary Disaster Arena Obstacles (Fallen drum, slabs with rebar, tilted pipe, cones)
+  // 3. Stationary Disaster Arena Obstacles (in DEMO mode only)
   const obstacleManager = createRealTimeObstacleManager(loader)
-  obstacleManager.buildMappedObstacles(grid)
+  obstacleManager.buildMappedObstacles(grid, isLive)
   root.add(obstacleManager.group)
 
-  const updateMapGrid = (newGrid: OccupancyGrid) => {
-    obstacleManager.buildMappedObstacles(newGrid)
+  const updateMapGrid = (newGrid: OccupancyGrid, liveMode = isLive) => {
+    boundaryManager.rebuildFromGrid(newGrid, liveMode)
+    obstacleManager.buildMappedObstacles(newGrid, liveMode)
   }
 
   // 4. Holographic Crimson Warning Waypoint Beacon (`⚠️`)
@@ -1642,8 +1767,8 @@ export function createSceneEnvironment(grid: OccupancyGrid): SceneEnvironment {
 
     fillLight.position.set(robotPos.x, 1.2, robotPos.y)
 
-    // Futuristic Boundary Shield pulse animation
-    boundaryShield.update(dtSec, pulseTime)
+    // Real-Time Designated Boundary pulse animation
+    boundaryManager.update(dtSec, pulseTime)
   }
 
   const dispose = () => {
@@ -1659,7 +1784,7 @@ export function createSceneEnvironment(grid: OccupancyGrid): SceneEnvironment {
     })
     skyDome.texture.dispose()
     obstacleManager.dispose()
-    boundaryShield.dispose()
+    boundaryManager.dispose()
   }
 
   return {

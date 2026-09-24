@@ -291,4 +291,7 @@ export interface RobotDataSource {
   subscribeMap?(listener: (map: OccupancyGrid | null) => void): () => void
   /** Request permission from a LIVE bridge before switching to another data source. */
   requestSourceSwitch?(target: 'LIVE' | 'DEMO'): Promise<boolean>
+  /** Optional bridge WebSocket endpoint URL management */
+  getBridgeUrl?(): string
+  setBridgeUrl?(url: string): void
 }
