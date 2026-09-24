@@ -122,7 +122,7 @@ const SpeedVfxShader: CustomShader = {
 
       // ── 5. Subtle Film Grain ─────────────────────────────────────────────────
       // Breaks the pure-CG look by adding a physical camera texture.
-      float grain = (hash(vUv + fract(uTime * 0.37)) - 0.5) * 0.028;
+      float grain = (hash(vUv + fract(uTime * 0.37)) - 0.5) * 0.005;
       color.rgb += grain;
 
       gl_FragColor = color;

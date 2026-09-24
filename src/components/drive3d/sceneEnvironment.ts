@@ -2,6 +2,217 @@ import * as THREE from 'three'
 import type { LidarPoint, OccupancyGrid, Position2D } from '../../types/robot'
 import { DEMO_OBSTACLE_ITEMS } from '../../data/mapGrid'
 
+/**
+ * Creates the Futuristic Translucent Blue-Purple Containment Forcefield Shield:
+ * - Replaces messy obstacle boundaries with an advanced sci-fi energy barrier
+ * - 4 vertical perimeter walls enclosing the arena (X: -3.5 to +3.5, Z: -2.3 to +2.3)
+ * - Proportionate height (0.35m) so the robot is contained without blocking the horizon
+ * - Crystal-clear translucent cyan-blue to neon-violet holographic gradient film
+ * - Animated upward scrolling energy scanlines and hexagonal forcefield matrix
+ * - Glowing neon top containment rail (cyan/violet dual line) & ground footing seam
+ * - 4 Minimalist corner energy emitter nodes with hovering crystals
+ */
+function createFuturisticBoundaryShield(): {
+  group: THREE.Group
+  update: (dtSec: number, pulseTime: number) => void
+  dispose: () => void
+} {
+  const group = new THREE.Group()
+  group.name = 'Futuristic_Boundary_Shield_Forcefield'
+
+  const halfWidth = 3.5  // Total width: 7.0m
+  const halfDepth = 2.3  // Total depth: 4.6m
+  const shieldHeight = 0.32 // Proportionate height (Burger height is 0.19m)
+
+  // 1. Crystal-Clear Holographic Energy Texture Canvas
+  const canvas = document.createElement('canvas')
+  canvas.width = 512
+  canvas.height = 256
+  const ctx = canvas.getContext('2d')!
+
+  // Soft vertical energy gradient:
+  // Feathered alpha at ground (y=256 in canvas) to seamless crystal cyan/violet in mid-body,
+  // gently brightening to a sleek neon edge at top (y=0 in canvas).
+  const grad = ctx.createLinearGradient(0, 256, 0, 0)
+  grad.addColorStop(0.0, 'rgba(0, 210, 255, 0.04)')    // Seamless soft ground contact (no harsh base line)
+  grad.addColorStop(0.20, 'rgba(14, 165, 233, 0.16)')   // Electric cyan-blue
+  grad.addColorStop(0.60, 'rgba(139, 92, 246, 0.22)')   // Sci-fi violet
+  grad.addColorStop(0.88, 'rgba(168, 85, 247, 0.36)')   // Neon purple
+  grad.addColorStop(1.0, 'rgba(216, 180, 254, 0.65)')   // Luminous top rim
+  ctx.fillStyle = grad
+  ctx.fillRect(0, 0, 512, 256)
+
+  // Delicate hexagonal cyber-matrix (subtle, clean, high-tech)
+  ctx.strokeStyle = 'rgba(192, 132, 252, 0.14)'
+  ctx.lineWidth = 1
+  const hexR = 20
+  const hexH = Math.sqrt(3) * hexR
+  for (let row = 0; row < 256 / hexH + 1; row++) {
+    for (let col = 0; col < 512 / (hexR * 3) + 1; col++) {
+      const cx = col * hexR * 3 + (row % 2 === 1 ? hexR * 1.5 : 0)
+      const cy = row * hexH
+      ctx.beginPath()
+      for (let a = 0; a < 6; a++) {
+        const ang = (a * Math.PI) / 3
+        const hx = cx + Math.cos(ang) * hexR
+        const hy = cy + Math.sin(ang) * hexR
+        if (a === 0) ctx.moveTo(hx, hy)
+        else ctx.lineTo(hx, hy)
+      }
+      ctx.closePath()
+      ctx.stroke()
+    }
+  }
+
+  const shieldTexture = new THREE.CanvasTexture(canvas)
+  shieldTexture.wrapS = THREE.RepeatWrapping
+  shieldTexture.wrapT = THREE.RepeatWrapping
+  shieldTexture.colorSpace = THREE.SRGBColorSpace
+
+  const shieldMaterial = new THREE.MeshBasicMaterial({
+    map: shieldTexture,
+    transparent: true,
+    opacity: 0.55,
+    side: THREE.DoubleSide,
+    blending: THREE.NormalBlending,
+    depthWrite: false,
+  })
+
+  // 4 Perimeter Walls (North, South, East, West) enclosing the arena
+  const wallPlanes: THREE.Mesh[] = []
+  const wallConfigs = [
+    { width: halfWidth * 2, x: 0, z: halfDepth, rotY: 0 },
+    { width: halfWidth * 2, x: 0, z: -halfDepth, rotY: Math.PI },
+    { width: halfDepth * 2, x: halfWidth, z: 0, rotY: Math.PI / 2 },
+    { width: halfDepth * 2, x: -halfWidth, z: 0, rotY: -Math.PI / 2 },
+  ]
+
+  wallConfigs.forEach(({ width, x, z, rotY }) => {
+    const geo = new THREE.PlaneGeometry(width, shieldHeight)
+    geo.translate(0, shieldHeight / 2, 0)
+
+    const wallMat = shieldMaterial.clone()
+    wallMat.map = shieldTexture.clone()
+    wallMat.map.wrapS = THREE.RepeatWrapping
+    wallMat.map.wrapT = THREE.RepeatWrapping
+    wallMat.map.repeat.set(width * 0.8, 1)
+    wallMat.map.needsUpdate = true
+
+    const mesh = new THREE.Mesh(geo, wallMat)
+    mesh.position.set(x, 0, z)
+    mesh.rotation.y = rotY
+    group.add(mesh)
+    wallPlanes.push(mesh)
+  })
+
+  // 2. Single Ultra-Crisp Glowing Neon Top Laser Rail (No double lines or multiple borders)
+  const topPts = [
+    new THREE.Vector3(-halfWidth, shieldHeight, -halfDepth),
+    new THREE.Vector3(halfWidth, shieldHeight, -halfDepth),
+    new THREE.Vector3(halfWidth, shieldHeight, halfDepth),
+    new THREE.Vector3(-halfWidth, shieldHeight, halfDepth),
+  ]
+  const railGeo = new THREE.BufferGeometry().setFromPoints(topPts)
+  const topRailMat = new THREE.LineBasicMaterial({
+    color: 0x38bdf8,
+    transparent: true,
+    opacity: 0.85,
+    blending: THREE.AdditiveBlending,
+  })
+  const topRail = new THREE.LineLoop(railGeo, topRailMat)
+  group.add(topRail)
+
+  // 3. 4 Minimalist Corner Energy Emitter Pylons
+  const cornerPositions = [
+    [-halfWidth, -halfDepth],
+    [halfWidth, -halfDepth],
+    [halfWidth, halfDepth],
+    [-halfWidth, halfDepth],
+  ]
+
+  const pylonBaseGeo = new THREE.CylinderGeometry(0.030, 0.040, 0.04, 16)
+  const pylonBaseMat = new THREE.MeshStandardMaterial({ color: 0x181524, roughness: 0.4, metalness: 0.85 })
+  const pylonRodGeo = new THREE.CylinderGeometry(0.006, 0.006, shieldHeight, 12)
+  const pylonRodMat = new THREE.MeshBasicMaterial({ color: 0x00f0ff, blending: THREE.AdditiveBlending })
+  const crystalGeo = new THREE.OctahedronGeometry(0.018, 0)
+  const crystalMat = new THREE.MeshBasicMaterial({
+    color: 0xc084fc,
+    transparent: true,
+    opacity: 0.90,
+    blending: THREE.AdditiveBlending,
+  })
+
+  const crystals: THREE.Mesh[] = []
+
+  cornerPositions.forEach(([cx, cz]) => {
+    const pylon = new THREE.Group()
+    pylon.position.set(cx, 0, cz)
+
+    const baseMesh = new THREE.Mesh(pylonBaseGeo, pylonBaseMat)
+    baseMesh.position.y = 0.02
+    pylon.add(baseMesh)
+
+    const rodMesh = new THREE.Mesh(pylonRodGeo, pylonRodMat)
+    rodMesh.position.y = shieldHeight / 2
+    pylon.add(rodMesh)
+
+    const crystal = new THREE.Mesh(crystalGeo, crystalMat)
+    crystal.position.y = shieldHeight + 0.02
+    pylon.add(crystal)
+    crystals.push(crystal)
+
+    const cornerLight = new THREE.PointLight(0x06b6d4, 0.25, 1.8, 2.0)
+    cornerLight.position.set(0, shieldHeight / 2, 0)
+    pylon.add(cornerLight)
+
+    group.add(pylon)
+  })
+
+  const update = (dtSec: number, pulseTime: number) => {
+    const wave = Math.sin(pulseTime * 2.0) * 0.04
+    wallPlanes.forEach((mesh) => {
+      const mat = mesh.material as THREE.MeshBasicMaterial
+      if (mat.map) {
+        mat.map.offset.y += dtSec * 0.08
+      }
+      mat.opacity = 0.55 + wave
+    })
+
+    crystals.forEach((crystal, idx) => {
+      crystal.rotation.y += dtSec * 1.5
+      crystal.rotation.x = Math.sin(pulseTime * 2.0 + idx) * 0.12
+      crystal.position.y = shieldHeight + 0.02 + Math.sin(pulseTime * 2.5 + idx) * 0.005
+    })
+  }
+
+  const dispose = () => {
+    group.traverse((obj) => {
+      if (obj instanceof THREE.Mesh || obj instanceof THREE.LineLoop || obj instanceof THREE.Line) {
+        obj.geometry?.dispose()
+        if (Array.isArray(obj.material)) {
+          obj.material.forEach((m) => {
+            if ('map' in m && m.map) (m.map as THREE.Texture).dispose()
+            m.dispose()
+          })
+        } else {
+          if ('map' in obj.material && obj.material.map) (obj.material.map as THREE.Texture).dispose()
+          obj.material?.dispose()
+        }
+      }
+    })
+    shieldTexture.dispose()
+  }
+
+  return {
+    group,
+    update,
+    dispose,
+  }
+}
+
+/**
+ * Creates the 360° Photorealistic Disaster Sky Dome:
+ */
 export interface SceneEnvironment {
   root: THREE.Group
   goalBeacon: THREE.Group
@@ -269,12 +480,12 @@ function createDisasterTerrain(loader: THREE.TextureLoader): THREE.Mesh {
     const r = Math.hypot(x, z)
 
     // Flat navigation arena around center for solid robot contact
-    if (r < 4.2) {
+    if (r < 4.6) {
       pos.setY(i, 0)
       continue
     }
 
-    const blend = Math.min(1, (r - 4.2) / 6.0)
+    const blend = Math.min(1, (r - 4.6) / 6.0)
     const wave1 = Math.sin(x * 0.1) * Math.cos(z * 0.1) * 0.60
     const wave2 = Math.sin(x * 0.22 + 1.2) * Math.sin(z * 0.2 + 0.8) * 0.30
     const wave3 = (Math.sin(x * 0.045 - 0.7) + Math.cos(z * 0.05 + 1.3)) * 1.2
@@ -294,7 +505,7 @@ function createDisasterTerrain(loader: THREE.TextureLoader): THREE.Mesh {
   const groundTex = new THREE.CanvasTexture(proceduralCanvas)
   groundTex.wrapS = THREE.RepeatWrapping
   groundTex.wrapT = THREE.RepeatWrapping
-  groundTex.repeat.set(6, 6)
+  groundTex.repeat.set(8, 12)
   groundTex.colorSpace = THREE.SRGBColorSpace
 
   const floorMat = new THREE.MeshStandardMaterial({
@@ -309,7 +520,7 @@ function createDisasterTerrain(loader: THREE.TextureLoader): THREE.Mesh {
     (tex) => {
       tex.wrapS = THREE.RepeatWrapping
       tex.wrapT = THREE.RepeatWrapping
-      tex.repeat.set(6, 6)
+      tex.repeat.set(8, 12)
       tex.colorSpace = THREE.SRGBColorSpace
       floorMat.map = tex
       floorMat.needsUpdate = true
@@ -1009,6 +1220,10 @@ export function createSceneEnvironment(grid: OccupancyGrid): SceneEnvironment {
   const terrain = createDisasterTerrain(loader)
   root.add(terrain)
 
+  // 2.5. Futuristic Boundary Shield - Translucent blue-purple force field perimeter
+  const boundaryShield = createFuturisticBoundaryShield()
+  root.add(boundaryShield.group)
+
   // 3. Stationary Disaster Arena Obstacles (Fallen drum, slabs with rebar, tilted pipe, cones)
   const obstacleManager = createRealTimeObstacleManager(loader)
   obstacleManager.buildMappedObstacles(grid)
@@ -1426,6 +1641,9 @@ export function createSceneEnvironment(grid: OccupancyGrid): SceneEnvironment {
     particleMat.opacity = isDriving ? 0.55 + speedFactor * 0.35 : 0.45
 
     fillLight.position.set(robotPos.x, 1.2, robotPos.y)
+
+    // Futuristic Boundary Shield pulse animation
+    boundaryShield.update(dtSec, pulseTime)
   }
 
   const dispose = () => {
@@ -1441,6 +1659,7 @@ export function createSceneEnvironment(grid: OccupancyGrid): SceneEnvironment {
     })
     skyDome.texture.dispose()
     obstacleManager.dispose()
+    boundaryShield.dispose()
   }
 
   return {
