@@ -306,7 +306,6 @@ function createDesignatedBoundaryManager(): DesignatedBoundaryManager {
         let maxC = c
         let minR = r
         let maxR = r
-        let touchesUnknown = false
 
         while (queue.length > 0) {
           const curr = queue.shift()!
@@ -321,16 +320,13 @@ function createDesignatedBoundaryManager(): DesignatedBoundaryManager {
               const nc = currC + dc
 
               if (nc < 0 || nc >= w || nr < 0 || nr >= h) {
-                touchesUnknown = true
                 continue
               }
 
               const nIdx = nr * w + nc
               const nState = cells[nIdx]
 
-              if (nState === 'unknown') {
-                touchesUnknown = true
-              } else if (nState === 'occupied' && !visited[nIdx]) {
+              if (nState === 'occupied' && !visited[nIdx]) {
                 visited[nIdx] = 1
                 queue.push(nIdx)
                 clusterIndices.push(nIdx)
@@ -346,12 +342,13 @@ function createDesignatedBoundaryManager(): DesignatedBoundaryManager {
         const spanX = (maxC - minC + 1) * res
         const spanZ = (maxR - minR + 1) * res
 
-        // An Interior Object is small (< 0.85m in both dims) and does NOT touch unknown space.
-        // It is an obstacle inside the room handled by obstacleManager, NOT an arena perimeter wall!
-        const isInteriorObject = spanX < 0.85 && spanZ < 0.85 && !touchesUnknown
+        // User concept: continuous lines read as border, and relatively closer compact things as objects.
+        // A cluster is an Interior Object if it is compact in both dimensions (< 0.80m) and has < 20 cells.
+        // (LiDAR naturally casts an 'unknown' shadow behind physical obstacles, so do NOT exclude based on touchesUnknown).
+        const isInteriorObject = spanX < 0.80 && spanZ < 0.80 && clusterIndices.length < 20
 
         if (!isInteriorObject) {
-          // Perimeter wall or large room partition
+          // Perimeter wall or large room partition: continuous lines form the boundary
           for (const cIdx of clusterIndices) {
             perimeterCellSet.add(cIdx)
           }
@@ -419,7 +416,7 @@ function createDesignatedBoundaryManager(): DesignatedBoundaryManager {
           current.x2 = Math.max(current.x2, next.x2)
         } else {
           const len = current.x2 - current.x1
-          if (len >= Math.max(0.20, res * 1.5)) {
+          if (len >= Math.max(0.35, res * 2.5)) {
             segments.push({ x1: current.x1, z1: z, x2: current.x2, z2: z, len })
           }
           current = next
@@ -427,7 +424,7 @@ function createDesignatedBoundaryManager(): DesignatedBoundaryManager {
       }
       if (current) {
         const len = current.x2 - current.x1
-        if (len >= Math.max(0.20, res * 1.5)) {
+        if (len >= Math.max(0.35, res * 2.5)) {
           segments.push({ x1: current.x1, z1: z, x2: current.x2, z2: z, len })
         }
       }
@@ -443,7 +440,7 @@ function createDesignatedBoundaryManager(): DesignatedBoundaryManager {
           current.z2 = Math.max(current.z2, next.z2)
         } else {
           const len = current.z2 - current.z1
-          if (len >= Math.max(0.20, res * 1.5)) {
+          if (len >= Math.max(0.35, res * 2.5)) {
             segments.push({ x1: x, z1: current.z1, x2: x, z2: current.z2, len })
           }
           current = next
@@ -451,7 +448,7 @@ function createDesignatedBoundaryManager(): DesignatedBoundaryManager {
       }
       if (current) {
         const len = current.z2 - current.z1
-        if (len >= Math.max(0.20, res * 1.5)) {
+        if (len >= Math.max(0.35, res * 2.5)) {
           segments.push({ x1: x, z1: current.z1, x2: x, z2: current.z2, len })
         }
       }
@@ -1400,7 +1397,6 @@ function createRealTimeObstacleManager(loader: THREE.TextureLoader) {
         let maxC = c
         let minR = r
         let maxR = r
-        let touchesUnknown = false
         let count = 1
 
         while (queue.length > 0) {
@@ -1414,14 +1410,11 @@ function createRealTimeObstacleManager(loader: THREE.TextureLoader) {
               const nr = currR + dr
               const nc = currC + dc
               if (nc < 0 || nc >= w || nr < 0 || nr >= h) {
-                touchesUnknown = true
                 continue
               }
               const nIdx = nr * w + nc
               const nState = cells[nIdx]
-              if (nState === 'unknown') {
-                touchesUnknown = true
-              } else if (nState === 'occupied' && !visited[nIdx]) {
+              if (nState === 'occupied' && !visited[nIdx]) {
                 visited[nIdx] = 1
                 queue.push(nIdx)
                 count++
@@ -1437,8 +1430,8 @@ function createRealTimeObstacleManager(loader: THREE.TextureLoader) {
         const spanX = (maxC - minC + 1) * res
         const spanZ = (maxR - minR + 1) * res
 
-        // An interior obstacle is small (< 0.85m in both directions) and surrounded by free space
-        if (spanX < 0.85 && spanZ < 0.85 && !touchesUnknown && count >= 2) {
+        // User concept: relatively closer / compact things (< 0.80m span and < 20 cells) are interior objects
+        if (spanX < 0.80 && spanZ < 0.80 && count >= 2 && count < 20) {
           const cx = origin.x + (minC + maxC + 1) * 0.5 * res
           const cz = origin.y + (minR + maxR + 1) * 0.5 * res
           const key = `${cx.toFixed(1)}_${cz.toFixed(1)}`

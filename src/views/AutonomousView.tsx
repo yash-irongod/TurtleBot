@@ -7,10 +7,13 @@ import { MicroLabel } from '../components/common/MicroLabel'
 import { WorldMap } from '../components/map/WorldMap'
 import { AutoExplorePanel } from '../components/map/AutoExplorePanel'
 import { NavigationStatusPanel } from '../components/map/NavigationStatusPanel'
+import { ManualSlamDeck } from '../components/map/ManualSlamDeck'
 import { batteryHealth, healthColor, proximityHealth } from '../lib/health'
 import { fixed, meters, metersPerSecond, percent } from '../lib/format'
 import { isAutonomous3DActive } from '../lib/driveSelectors'
 import { AutonomousDrive3DView } from '../components/drive3d/AutonomousDrive3DView'
+
+type MappingMode = 'manual' | 'target' | 'explore'
 
 function AutonomousReadout() {
   const { telemetry } = useRobot()
@@ -74,6 +77,7 @@ export function AutonomousView() {
   const { sourceStatus, activeMode, emergencyStopped, navigation, exploration } = useRobot()
   const is3DActive = isAutonomous3DActive({ sourceStatus, activeMode, emergencyStopped, navigation, exploration })
   const [operatorOverride2D, setOperatorOverride2D] = useState(false)
+  const [mappingMode, setMappingMode] = useState<MappingMode>('manual')
 
   // Reset override whenever active navigation route resets
   useEffect(() => {
@@ -81,6 +85,20 @@ export function AutonomousView() {
       setOperatorOverride2D(false)
     }
   }, [is3DActive])
+
+  // Automatically switch to target tab if a navigation target route starts
+  useEffect(() => {
+    if (navigation.navigationState === 'NAVIGATING' || navigation.navigationState === 'PLANNING') {
+      setMappingMode('target')
+    }
+  }, [navigation.navigationState])
+
+  // Automatically switch to explore tab if exploration starts
+  useEffect(() => {
+    if (exploration.state === 'EXPLORING' || exploration.state === 'STARTING') {
+      setMappingMode('explore')
+    }
+  }, [exploration.state])
 
   const show3D = is3DActive && !operatorOverride2D
 
@@ -109,11 +127,53 @@ export function AutonomousView() {
         )}
       </section>
       <aside className="flex min-h-0 flex-col gap-3 overflow-y-auto pr-0.5" aria-label="Autonomous navigation status">
-        <AutoExplorePanel />
-        <NavigationStatusPanel />
+        {/* Mapping & Navigation Mode Selector */}
+        <div className="flex rounded-lg border border-white/[0.08] bg-void-950/80 p-1">
+          <button
+            type="button"
+            onClick={() => setMappingMode('manual')}
+            className={clsx(
+              'flex-1 rounded-md py-1.5 text-center font-mono text-[10px] font-semibold uppercase tracking-wider transition',
+              mappingMode === 'manual'
+                ? 'border border-signal-400/40 bg-signal-900/70 text-signal-300 shadow-sm'
+                : 'text-ink-400 hover:text-ink-200',
+            )}
+          >
+            Manual SLAM
+          </button>
+          <button
+            type="button"
+            onClick={() => setMappingMode('target')}
+            className={clsx(
+              'flex-1 rounded-md py-1.5 text-center font-mono text-[10px] font-semibold uppercase tracking-wider transition',
+              mappingMode === 'target'
+                ? 'border border-signal-400/40 bg-signal-900/70 text-signal-300 shadow-sm'
+                : 'text-ink-400 hover:text-ink-200',
+            )}
+          >
+            Target Nav
+          </button>
+          <button
+            type="button"
+            onClick={() => setMappingMode('explore')}
+            className={clsx(
+              'flex-1 rounded-md py-1.5 text-center font-mono text-[10px] font-semibold uppercase tracking-wider transition',
+              mappingMode === 'explore'
+                ? 'border border-signal-400/40 bg-signal-900/70 text-signal-300 shadow-sm'
+                : 'text-ink-400 hover:text-ink-200',
+            )}
+          >
+            Auto Explore
+          </button>
+        </div>
+
+        {mappingMode === 'manual' && <ManualSlamDeck />}
+        {mappingMode === 'target' && <NavigationStatusPanel />}
+        {mappingMode === 'explore' && <AutoExplorePanel />}
+
         <AutonomousReadout />
         <p className="px-1 font-mono text-[10px] leading-relaxed text-ink-500">
-          Autonomous controls connect directly to ROS 2 Nav2 and Frontier Explorer in LIVE mode, and run the simulated navigation model in DEMO mode.
+          Drive manually to quickly map rooms and scan obstacles, set Nav2 map targets, or launch autonomous frontier exploration.
         </p>
       </aside>
     </div>

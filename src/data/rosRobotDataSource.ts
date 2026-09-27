@@ -639,6 +639,7 @@ export function createRosRobotDataSource(options: RosRobotDataSourceOptions = {}
               path: nextPath,
               distanceRemainingM,
               progressPct: nextState === 'GOAL_REACHED' ? 100 : 0,
+              detail: typeof nav.detail === 'string' ? nav.detail : undefined,
             })
             return
           }

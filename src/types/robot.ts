@@ -165,6 +165,7 @@ export interface NavigationInfo {
   path: Position2D[]
   distanceRemainingM: number
   progressPct: number
+  detail?: string
 }
 
 /* ------------------------------------------------------------------ */
