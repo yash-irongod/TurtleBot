@@ -54,31 +54,31 @@ const TONE_CLASS: Record<NavigationTone, { dot: string; text: string; border: st
   },
 }
 
-function presentationFor(state: NavigationState, environment: DataEnvironment): NavigationPresentation {
+function presentationFor(state: NavigationState, environment: DataEnvironment, customDetail?: string): NavigationPresentation {
   const base = NAVIGATION_PRESENTATION[state]
   if (environment !== 'live') return base
   if (state === 'GOAL_REACHED') {
-    return { ...base, detail: 'The live robot reached the Nav2 goal.' }
+    return { ...base, detail: customDetail || 'The live robot reached the Nav2 goal.' }
   }
   if (state === 'FAILED') {
-    return { ...base, detail: 'Nav2 ended the route without reaching its target.' }
+    return { ...base, detail: customDetail || 'Nav2 ended the route without reaching its target.' }
   }
   if (state === 'NAVIGATING') {
-    return { ...base, detail: 'Following the live Nav2 route.' }
+    return { ...base, detail: customDetail || 'Following the live Nav2 route.' }
   }
   if (state === 'PLANNING') {
-    return { ...base, detail: 'Preparing the live Nav2 route.' }
+    return { ...base, detail: customDetail || 'Preparing the live Nav2 route.' }
   }
   if (state === 'PAUSED') {
-    return { ...base, detail: 'The current live goal is retained.' }
+    return { ...base, detail: customDetail || 'The current live goal is retained.' }
   }
   if (state === 'CANCELING') {
-    return { ...base, detail: 'Waiting for the live Nav2 goal to terminate.' }
+    return { ...base, detail: customDetail || 'Waiting for the live Nav2 goal to terminate.' }
   }
   if (state === 'READY') {
-    return { ...base, detail: 'A live map target is ready to start.' }
+    return { ...base, detail: customDetail || 'A live map target is ready to start.' }
   }
-  return base
+  return { ...base, detail: customDetail || base.detail }
 }
 
 const SOURCE_LABEL: Record<DataEnvironment, string> = {

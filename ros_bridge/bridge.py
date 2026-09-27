@@ -60,7 +60,7 @@ try:
     )
 
     from action_msgs.msg import GoalStatus
-    from geometry_msgs.msg import Point, PointStamped, Pose, PoseArray, PoseStamped, Quaternion, Twist
+    from geometry_msgs.msg import Point, PointStamped, Pose, PoseArray, PoseStamped, PoseWithCovarianceStamped, Quaternion, Twist
     from nav_msgs.msg import OccupancyGrid, Odometry, Path
     from sensor_msgs.msg import BatteryState, Imu, LaserScan
     from visualization_msgs.msg import Marker, MarkerArray
@@ -190,21 +190,6 @@ class TurtleBotBridgeNode:
         self.battery_sub = self.node.create_subscription(
             BatteryState, "/battery_state", self._on_battery, qos_profile_sensor_data
         )
-
-        # Map-frame pose is derived from TF rather than treating /odom coordinates as /map.
-        self.tf_buffer = None
-        self.tf_listener = None
-        self._latest_map_pose = None
-        self._latest_map_pose_lock = threading.Lock()
-        if HAS_TF2:
-            try:
-                self.tf_buffer = Buffer()
-                self.tf_listener = TransformListener(self.tf_buffer, self.node, spin_thread=False)
-                self._map_pose_timer = self.node.create_timer(0.10, self._update_map_pose_from_tf)
-            except Exception as exc:
-                self.logger.warn(f"TF2 map-pose listener unavailable: {exc}")
-                self.tf_buffer = None
-                self.tf_listener = None
 
         # 3. Real /map subscription (Transient Local QoS for latched maps)
         map_qos = QoSProfile(
@@ -349,129 +334,39 @@ class TurtleBotBridgeNode:
     # --------------------------------------------------------------------------
     # Telemetry Callbacks
     # --------------------------------------------------------------------------
-    def _update_map_pose_from_tf(self):
-        """Cache the latest robot pose expressed in the authoritative map frame."""
-        if self.tf_buffer is None:
-            return
-        for base_frame in BASE_FRAMES:
-            try:
-                transform = self.tf_buffer.lookup_transform(
-                    MAP_FRAME, base_frame, rclpy.time.Time()
-                )
-                t = transform.transform.translation
-                q = transform.transform.rotation
-                siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
-                cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
-                yaw_rad = math.atan2(siny_cosp, cosy_cosp)
-                with self._latest_map_pose_lock:
-                    self._latest_map_pose = {
-                        "position": {"x": float(t.x), "y": float(t.y)},
-                        "yaw_rad": float(yaw_rad),
-                        "frame_id": MAP_FRAME,
-                        "base_frame": base_frame,
-                        "timestamp": time.time(),
-                    }
-                return
-            except Exception:
-                continue
-
-    def _get_latest_map_pose(self):
-        with self._latest_map_pose_lock:
-            if self._latest_map_pose is None:
-                return None
-            return dict(self._latest_map_pose)
-
-    def _path_payload(self, msg: Path):
-        """Return path points in the authoritative map frame when TF is available."""
-        frame_id = msg.header.frame_id or MAP_FRAME
-        if frame_id == MAP_FRAME:
-            return [
-                {"x": float(p.pose.position.x), "y": float(p.pose.position.y)}
-                for p in msg.poses
-            ]
-        if self.tf_buffer is None:
-            return []
-
-        try:
-            transform = self.tf_buffer.lookup_transform(
-                MAP_FRAME, frame_id, rclpy.time.Time()
-            ).transform
-            tx = float(transform.translation.x)
-            ty = float(transform.translation.y)
-            q = transform.rotation
-            siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
-            cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
-            yaw = math.atan2(siny_cosp, cosy_cosp)
-            cos_yaw = math.cos(yaw)
-            sin_yaw = math.sin(yaw)
-            return [
-                {
-                    "x": float(tx + cos_yaw * p.pose.position.x - sin_yaw * p.pose.position.y),
-                    "y": float(ty + sin_yaw * p.pose.position.x + cos_yaw * p.pose.position.y),
-                }
-                for p in msg.poses
-            ]
-        except Exception:
-            # Do not guess a coordinate frame. Returning raw points with the original
-            # frame marker lets the frontend keep the route out of the map overlay.
-            return []
-
-    def _on_plan(self, msg: Path):
-        now = time.time()
-        if now - self.last_plan_broadcast < 0.20:
-            return
-        self.last_plan_broadcast = now
-        frame_id = msg.header.frame_id or MAP_FRAME
-        self.broadcast({
-            "type": "nav_plan",
-            "navigation": {
-                "path": self._path_payload(msg),
-                "frame_id": MAP_FRAME if frame_id != MAP_FRAME else frame_id,
-                "source_frame_id": frame_id,
-                "plan_source": "global",
-            },
-        })
-
-    def _on_local_plan(self, msg: Path):
-        # Local controller paths are useful diagnostically but are not rendered as the
-        # primary route. Keep them separate so the UI never confuses controller output
-        # with the global Nav2 plan.
-        now = time.time()
-        if now - self.last_local_plan_broadcast < 0.20:
-            return
-        self.last_local_plan_broadcast = now
-        frame_id = msg.header.frame_id or MAP_FRAME
-        self.broadcast({
-            "type": "nav_local_plan",
-            "navigation": {
-                "path": self._path_payload(msg),
-                "frame_id": MAP_FRAME if frame_id != MAP_FRAME else frame_id,
-                "source_frame_id": frame_id,
-                "plan_source": "local",
-            },
-        })
-
     def _on_odom(self, msg: Odometry):
         now = time.time()
         if now - self.last_odom_broadcast < 0.05:  # max ~20 Hz
             return
         self.last_odom_broadcast = now
 
-        pos = msg.pose.pose.position
-        ori = msg.pose.pose.orientation
-        siny_cosp = 2.0 * (ori.w * ori.z + ori.x * ori.y)
-        cosy_cosp = 1.0 - 2.0 * (ori.y * ori.y + ori.z * ori.z)
-        yaw_rad = math.atan2(siny_cosp, cosy_cosp)
+        # Prioritize true map-frame SLAM pose if available within 3.0s, else fallback to wheel odometry
+        if self.map_pose and (now - self.map_pose["timestamp"] < 3.0):
+            pos_x = self.map_pose["x"]
+            pos_y = self.map_pose["y"]
+            yaw_rad = self.map_pose["yaw_rad"]
+            ori_dict = self.map_pose["orientation"]
+        else:
+            pos = msg.pose.pose.position
+            ori = msg.pose.pose.orientation
+            siny_cosp = 2.0 * (ori.w * ori.z + ori.x * ori.y)
+            cosy_cosp = 1.0 - 2.0 * (ori.y * ori.y + ori.z * ori.z)
+            yaw_rad = math.atan2(siny_cosp, cosy_cosp)
+            pos_x = pos.x
+            pos_y = pos.y
+            ori_dict = {"x": ori.x, "y": ori.y, "z": ori.z, "w": ori.w}
 
         payload = {
             "type": "odom",
             "odometry": {
                 "position": {"x": pos.x, "y": pos.y},
-                # Raw /odom yaw remains available for backward compatibility.
+                # yaw_rad: raw ROS yaw in radians (0 = East/+X, positive CCW).
+                # The frontend converts this using rosYawToFrontendHeadingDeg()
+                # so that 0° = North, 90° = East matches the compass convention.
                 "yaw_rad": yaw_rad,
                 "linear_x": msg.twist.twist.linear.x,
                 "angular_z": msg.twist.twist.angular.z,
-                "orientation": {"x": ori.x, "y": ori.y, "z": ori.z, "w": ori.w},
+                "orientation": ori_dict,
             },
         }
         map_pose = self._get_latest_map_pose()
@@ -763,7 +658,11 @@ class TurtleBotBridgeNode:
 
         goal_msg = NavigateToPose.Goal()
         goal_msg.pose.header.frame_id = "map"
-        goal_msg.pose.header.stamp = self.node.get_clock().now().to_msg()
+        # Zero timestamp tells tf2 in Nav2 to use the latest available transform, preventing clock-skew aborts
+        try:
+            goal_msg.pose.header.stamp = rclpy.time.Time().to_msg()
+        except Exception:
+            goal_msg.pose.header.stamp = self.node.get_clock().now().to_msg()
         goal_msg.pose.pose.position.x = float(x)
         goal_msg.pose.pose.position.y = float(y)
         goal_msg.pose.pose.position.z = 0.0
@@ -879,9 +778,14 @@ class TurtleBotBridgeNode:
         with self._explore_lock:
             explore_lifecycle_busy = self.exploration_state in ("STARTING", "EXPLORING", "STOPPING")
         if explore_lifecycle_busy:
-            self.logger.warn("NavigateToPose rejected: exploration lifecycle is active")
-            self._broadcast_nav_status("FAILED", "Navigation rejected while exploration is active")
-            return
+            self.logger.info("Auto-stopping active exploration to transition to NavigateToPose target...")
+            self.stop_exploration()
+            start_wait = time.time()
+            while time.time() - start_wait < 2.5:
+                with self._explore_lock:
+                    if self.exploration_state in ("IDLE", "COMPLETE", "ERROR"):
+                        break
+                time.sleep(0.05)
 
         if not HAS_NAV2 or self.nav_client is None:
             self.logger.error("NavigateToPose requested but Nav2 action client is not available")
