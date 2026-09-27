@@ -152,44 +152,44 @@ export function extractMapGeometry(grid: OccupancyGrid): MapGeometry {
     }
   }
 
-  const minBoundarySpanM = Math.max(0.72, res * 6)
-  const boundaryComponents = components.filter((component) => {
-    if (!component.touchesOutside || component.cells.length < 4) return false
-    const spanXM = (component.maxC - component.minC + 1) * res
-    const spanYM = (component.maxR - component.minR + 1) * res
-    // A true arena boundary is expected to form a relatively long run. This keeps
-    // small sensor returns near the unmapped frontier from being promoted to walls.
-    return Math.max(spanXM, spanYM) >= minBoundarySpanM
-  })
-  const boundaryCellSet = new Uint8Array(w * h)
-  for (const component of boundaryComponents) {
-    for (const idx of component.cells) boundaryCellSet[idx] = 1
-  }
-
+  const minBoundarySpanM = Math.max(0.65, res * 5.0)
+  const boundaryComponents: typeof components = []
   const obstacles: MapObstacleRegion[] = []
+
   for (const component of components) {
-    if (component.touchesOutside || component.cells.length < 2) continue
+    if (component.cells.length < 2) continue
 
     const widthM = (component.maxC - component.minC + 1) * res
     const heightM = (component.maxR - component.minR + 1) * res
+    const maxSpanM = Math.max(widthM, heightM)
 
-    // Keep compact interior regions as semantic objects. Large interior structures
-    // are left in the raw occupancy map instead of being turned into decorative props.
-    if (widthM > 1.8 || heightM > 1.8) continue
+    // Further/continuous lines read as border:
+    // Long runs (span >= minBoundarySpanM) or large clusters (>= 20 cells)
+    const isContinuousLine = maxSpanM >= minBoundarySpanM || component.cells.length >= 20
 
-    const center = {
-      x: origin.x + (component.minC + component.maxC + 1) * 0.5 * res,
-      y: origin.y + (component.minR + component.maxR + 1) * 0.5 * res,
+    if (isContinuousLine) {
+      boundaryComponents.push(component)
+    } else if (widthM <= 1.25 && heightM <= 1.25) {
+      // Relatively closer, compact clusters read as objects (even if LiDAR cast an
+      // unmapped unknown shadow behind them connecting to the edge).
+      const center = {
+        x: origin.x + (component.minC + component.maxC + 1) * 0.5 * res,
+        y: origin.y + (component.minR + component.maxR + 1) * 0.5 * res,
+      }
+      obstacles.push({
+        center,
+        min: { x: origin.x + component.minC * res, y: origin.y + component.minR * res },
+        max: { x: origin.x + (component.maxC + 1) * res, y: origin.y + (component.maxR + 1) * res },
+        widthM,
+        heightM,
+        cellCount: component.cells.length,
+      })
     }
+  }
 
-    obstacles.push({
-      center,
-      min: { x: origin.x + component.minC * res, y: origin.y + component.minR * res },
-      max: { x: origin.x + (component.maxC + 1) * res, y: origin.y + (component.maxR + 1) * res },
-      widthM,
-      heightM,
-      cellCount: component.cells.length,
-    })
+  const boundaryCellSet = new Uint8Array(w * h)
+  for (const component of boundaryComponents) {
+    for (const idx of component.cells) boundaryCellSet[idx] = 1
   }
 
   // Convert boundary cells to a single-sided contour. Prefer the edge facing known
@@ -248,8 +248,8 @@ export function extractMapGeometry(grid: OccupancyGrid): MapGeometry {
   }
 
   const boundarySegments: MapBoundarySegment[] = []
-  const minSegmentM = Math.max(0.25, res * 2.0)
-  const mergeGapM = res * 0.75
+  const minSegmentM = Math.max(0.28, res * 2.0)
+  const mergeGapM = res * 2.2
 
   horizontal.forEach((intervals, key) => {
     intervals.sort((a, b) => a.x1 - b.x1)

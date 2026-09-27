@@ -51,6 +51,10 @@ try:
     import rclpy
     from rclpy.action import ActionClient
     from rclpy.node import Node
+    try:
+        from rclpy.executors import MultiThreadedExecutor
+    except ImportError:
+        MultiThreadedExecutor = None
     from rclpy.qos import (
         DurabilityPolicy,
         HistoryPolicy,
@@ -190,6 +194,50 @@ class TurtleBotBridgeNode:
         self.battery_sub = self.node.create_subscription(
             BatteryState, "/battery_state", self._on_battery, qos_profile_sensor_data
         )
+
+        # 2b. Map-frame pose tracking via TF2 and direct SLAM topic fallback
+        self.map_pose: Optional[Dict[str, Any]] = None
+        if HAS_TF2 and Buffer is not None and TransformListener is not None:
+            try:
+                self.tf_buffer = Buffer()
+                self.tf_listener = TransformListener(self.tf_buffer, self.node)
+                self.logger.info("tf2_ros TransformListener initialized for map->base tracking")
+            except Exception as e:
+                self.logger.warn(f"Failed to initialize tf2_ros TransformListener: {e}")
+                self.tf_buffer = None
+                self.tf_listener = None
+        else:
+            self.tf_buffer = None
+            self.tf_listener = None
+
+        # Fallback SLAM pose subscriptions in case tf2 is delayed or missing
+        try:
+            self.tracked_pose_sub = self.node.create_subscription(
+                PoseStamped, "/tracked_pose", self._on_map_pose, qos_profile_sensor_data
+            )
+        except Exception:
+            self.tracked_pose_sub = None
+
+        try:
+            self.slam_pose_sub = self.node.create_subscription(
+                PoseWithCovarianceStamped, "/pose", self._on_map_pose, qos_profile_sensor_data
+            )
+        except Exception:
+            self.slam_pose_sub = None
+
+        try:
+            self.amcl_pose_sub = self.node.create_subscription(
+                PoseWithCovarianceStamped, "/amcl_pose", self._on_map_pose, qos_profile_sensor_data
+            )
+        except Exception:
+            self.amcl_pose_sub = None
+
+        try:
+            self.robot_pose_sub = self.node.create_subscription(
+                PoseWithCovarianceStamped, "/robot_pose", self._on_map_pose, qos_profile_sensor_data
+            )
+        except Exception:
+            self.robot_pose_sub = None
 
         # 3. Real /map subscription (Transient Local QoS for latched maps)
         map_qos = QoSProfile(
@@ -334,27 +382,105 @@ class TurtleBotBridgeNode:
     # --------------------------------------------------------------------------
     # Telemetry Callbacks
     # --------------------------------------------------------------------------
+    def _on_map_pose(self, msg):
+        """Update map-frame SLAM robot pose from Cartographer / slam_toolbox / AMCL."""
+        try:
+            if hasattr(msg, "pose") and hasattr(msg.pose, "pose"):
+                pos = msg.pose.pose.position
+                ori = msg.pose.pose.orientation
+            elif hasattr(msg, "pose") and hasattr(msg.pose, "position"):
+                pos = msg.pose.position
+                ori = msg.pose.orientation
+            else:
+                return
+
+            siny_cosp = 2.0 * (ori.w * ori.z + ori.x * ori.y)
+            cosy_cosp = 1.0 - 2.0 * (ori.y * ori.y + ori.z * ori.z)
+            yaw_rad = math.atan2(siny_cosp, cosy_cosp)
+
+            self.map_pose = {
+                "position": {"x": float(pos.x), "y": float(pos.y)},
+                "yaw_rad": float(yaw_rad),
+                "orientation": {"x": ori.x, "y": ori.y, "z": ori.z, "w": ori.w},
+                "timestamp": time.time(),
+            }
+        except Exception:
+            pass
+
+    def _get_latest_map_pose(self) -> Optional[Dict[str, Any]]:
+        """Resolve the latest robot pose in the map frame via TF or direct SLAM pose."""
+        # 1. Try TF buffer lookup first (non-blocking lookup of latest transform)
+        if self.tf_buffer is not None:
+            for base_frame in BASE_FRAMES:
+                try:
+                    tf_stamped = self.tf_buffer.lookup_transform(
+                        MAP_FRAME,
+                        base_frame,
+                        rclpy.time.Time(),
+                        timeout=rclpy.duration.Duration(seconds=0.0),
+                    )
+                    trans = tf_stamped.transform.translation
+                    rot = tf_stamped.transform.rotation
+                    siny_cosp = 2.0 * (rot.w * rot.z + rot.x * rot.y)
+                    cosy_cosp = 1.0 - 2.0 * (rot.y * rot.y + rot.z * rot.z)
+                    yaw_rad = math.atan2(siny_cosp, cosy_cosp)
+                    return {
+                        "position": {"x": float(trans.x), "y": float(trans.y)},
+                        "yaw_rad": float(yaw_rad),
+                        "orientation": {"x": rot.x, "y": rot.y, "z": rot.z, "w": rot.w},
+                    }
+                except Exception:
+                    continue
+
+        # 2. Fall back to subscribed topic map_pose if recent (< 5.0s)
+        if self.map_pose is not None and (time.time() - self.map_pose.get("timestamp", 0) < 5.0):
+            return {
+                "position": self.map_pose["position"],
+                "yaw_rad": self.map_pose["yaw_rad"],
+                "orientation": self.map_pose["orientation"],
+            }
+
+        return None
+
+    def _on_plan(self, msg: Path):
+        now = time.time()
+        if now - self.last_plan_broadcast < 0.2:  # max ~5 Hz
+            return
+        self.last_plan_broadcast = now
+        path_points = [{"x": float(p.pose.position.x), "y": float(p.pose.position.y)} for p in msg.poses]
+        payload = {
+            "type": "nav_plan",
+            "navigation": {
+                "path": path_points,
+            },
+        }
+        self.broadcast(payload)
+
+    def _on_local_plan(self, msg: Path):
+        now = time.time()
+        if now - self.last_local_plan_broadcast < 0.2:
+            return
+        self.last_local_plan_broadcast = now
+        path_points = [{"x": float(p.pose.position.x), "y": float(p.pose.position.y)} for p in msg.poses]
+        payload = {
+            "type": "nav_local_plan",
+            "navigation": {
+                "local_path": path_points,
+            },
+        }
+        self.broadcast(payload)
+
     def _on_odom(self, msg: Odometry):
         now = time.time()
         if now - self.last_odom_broadcast < 0.05:  # max ~20 Hz
             return
         self.last_odom_broadcast = now
 
-        # Prioritize true map-frame SLAM pose if available within 3.0s, else fallback to wheel odometry
-        if self.map_pose and (now - self.map_pose["timestamp"] < 3.0):
-            pos_x = self.map_pose["x"]
-            pos_y = self.map_pose["y"]
-            yaw_rad = self.map_pose["yaw_rad"]
-            ori_dict = self.map_pose["orientation"]
-        else:
-            pos = msg.pose.pose.position
-            ori = msg.pose.pose.orientation
-            siny_cosp = 2.0 * (ori.w * ori.z + ori.x * ori.y)
-            cosy_cosp = 1.0 - 2.0 * (ori.y * ori.y + ori.z * ori.z)
-            yaw_rad = math.atan2(siny_cosp, cosy_cosp)
-            pos_x = pos.x
-            pos_y = pos.y
-            ori_dict = {"x": ori.x, "y": ori.y, "z": ori.z, "w": ori.w}
+        pos = msg.pose.pose.position
+        ori = msg.pose.pose.orientation
+        siny_cosp = 2.0 * (ori.w * ori.z + ori.x * ori.y)
+        cosy_cosp = 1.0 - 2.0 * (ori.y * ori.y + ori.z * ori.z)
+        yaw_rad = math.atan2(siny_cosp, cosy_cosp)
 
         payload = {
             "type": "odom",
@@ -366,7 +492,7 @@ class TurtleBotBridgeNode:
                 "yaw_rad": yaw_rad,
                 "linear_x": msg.twist.twist.linear.x,
                 "angular_z": msg.twist.twist.angular.z,
-                "orientation": ori_dict,
+                "orientation": {"x": ori.x, "y": ori.y, "z": ori.z, "w": ori.w},
             },
         }
         map_pose = self._get_latest_map_pose()
@@ -794,9 +920,7 @@ class TurtleBotBridgeNode:
 
         map_pose = self._get_latest_map_pose()
         if map_pose is None:
-            self.logger.warn("NavigateToPose rejected: no map->base TF is currently available")
-            self._broadcast_nav_status("FAILED", "No live map-frame robot pose available (map→base TF)")
-            return
+            self.logger.info("Bridge has not cached map->base TF yet; proceeding to let Nav2 action server transform pose")
 
         # Atomic ownership acquisition happens before the server wait, so another motion
         # source cannot enter while this request is blocked on Nav2 availability.
@@ -806,10 +930,12 @@ class TurtleBotBridgeNode:
 
         self.logger.info("Checking if /navigate_to_pose action server is ready...")
         if not self.nav_client.wait_for_server(timeout_sec=2.0):
-            self.logger.error("Nav2 /navigate_to_pose action server is not active")
-            self._release_ownership(MOTION_NAVIGATION)
-            self._broadcast_nav_status("FAILED", "Nav2 action server not responding")
-            return
+            self.logger.info("Nav2 action server not immediately ready, ensuring mapping/nav stack is running...")
+            if not self._ensure_mapping_navigation_stack(timeout_sec=15.0):
+                self.logger.error("Nav2 /navigate_to_pose action server is not active")
+                self._release_ownership(MOTION_NAVIGATION)
+                self._broadcast_nav_status("FAILED", "Nav2 action server not responding (verify Nav2 is launched)")
+                return
 
         if not self.accepting_commands:
             self.logger.warn("NavigateToPose aborted: operator session ended during server wait")
@@ -902,7 +1028,7 @@ class TurtleBotBridgeNode:
             # waking cancellation/replacement waiters.
             record.result_event.set()
             if current:
-                self._broadcast_nav_status("FAILED", "Goal rejected by Nav2")
+                self._broadcast_nav_status("FAILED", "Goal rejected by Nav2: target may be in obstacle clearance zone or unmapped")
             return
 
         result_future = goal_handle.get_result_async()
@@ -1049,7 +1175,10 @@ class TurtleBotBridgeNode:
                 else:
                     self.nav_state = "FAILED"
                     terminal_state = "FAILED"
-                    terminal_detail = f"Navigation failed with status {status}"
+                    if status == GoalStatus.STATUS_ABORTED:
+                        terminal_detail = "Nav2 aborted route: goal is unreachable or in obstacle clearance zone"
+                    else:
+                        terminal_detail = f"Navigation failed with status {status}"
                 self._release_navigation_with_zero()
                 should_broadcast = True
 
@@ -2476,7 +2605,12 @@ def main():
     def ros_spin():
         print("[INFO] ROS 2 executor thread spinning...")
         try:
-            rclpy.spin(bridge_node.node)
+            if MultiThreadedExecutor is not None:
+                executor = MultiThreadedExecutor()
+                executor.add_node(bridge_node.node)
+                executor.spin()
+            else:
+                rclpy.spin(bridge_node.node)
         except Exception as e:
             print(f"[ROS EXCEPTION] {e}")
 

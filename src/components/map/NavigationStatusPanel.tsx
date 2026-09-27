@@ -61,7 +61,12 @@ function presentationFor(state: NavigationState, environment: DataEnvironment, c
     return { ...base, detail: customDetail || 'The live robot reached the Nav2 goal.' }
   }
   if (state === 'FAILED') {
-    return { ...base, detail: customDetail || 'Nav2 ended the route without reaching its target.' }
+    return {
+      ...base,
+      detail:
+        customDetail ||
+        'Nav2 could not reach this target. The cell may be in an obstacle clearance zone, blocked, or unmapped. Try clicking a clearly open free cell.',
+    }
   }
   if (state === 'NAVIGATING') {
     return { ...base, detail: customDetail || 'Following the live Nav2 route.' }
