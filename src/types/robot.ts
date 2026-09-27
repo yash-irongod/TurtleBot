@@ -165,6 +165,10 @@ export interface NavigationInfo {
   path: Position2D[]
   distanceRemainingM: number
   progressPct: number
+  /** Last backend navigation detail, primarily useful for LIVE/Nav2 diagnostics. */
+  detail?: string
+  /** Raw action_msgs/GoalStatus code when the bridge has one. */
+  statusCode?: number | null
 }
 
 /* ------------------------------------------------------------------ */

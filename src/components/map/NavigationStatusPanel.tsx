@@ -95,10 +95,11 @@ function sourceNote(environment: DataEnvironment): string {
 
 export function NavigationStatusPanel() {
   const { navigation, environment, sourceStatus } = useRobot()
-  const { navigationState, goal, distanceRemainingM, progressPct } = navigation
+  const { navigationState, goal, distanceRemainingM, progressPct, detail } = navigation
   const isLive = sourceStatus === 'LIVE'
   const panelTitleId = useId().replace(/:/g, '')
-  const presentation = presentationFor(navigationState, environment)
+  const basePresentation = presentationFor(navigationState, environment)
+  const presentation = environment === 'live' && detail ? { ...basePresentation, detail } : basePresentation
   const tone = TONE_CLASS[presentation.tone]
   const progress = Math.max(0, Math.min(100, progressPct))
   const progressLabel = goal

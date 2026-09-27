@@ -4,13 +4,17 @@ TurtleBot 3 Burger ROS 2 WebSocket Bridge.
 
 Features:
 - Telemetry: /odom, /scan, /imu, /battery_state -> WebSocket broadcast
+  * Robot pose on the map is derived from TF (map -> base_link/base_footprint), while
+    velocity still comes from /odom.
 - Velocity Control: receives { type: "cmd_vel", linear, angular } -> publishes /cmd_vel
 - Nav2 Autonomous Navigation: ROS 2 ActionClient for nav2_msgs/action/NavigateToPose (/navigate_to_pose)
   * Accepts { type: "nav_goal", x, y, yaw } in map frame
   * Accepts { type: "nav_cancel" } -> cancels action goal + sends zero velocity
   * Streams feedback (distance remaining) and result (GOAL_REACHED, CANCELED, FAILED)
+  * Streams Nav2 global/local path topics when available.
 - Auto Explore Management:
-  * Manages ~/turtlebot3_ws/launch/autonomous_exploration.launch.py as a supervised subprocess group
+  * Ensures ~/turtlebot3_ws/launch/control_center_mapping_navigation.launch.py is running
+    for Cartographer + Nav2, then supervises the explorer-only launch process.
   * Accepts { type: "explore_start" } and { type: "explore_stop" }
   * Prevents duplicate exploration instances
   * Clean shutdown with process group signals + immediate zero cmd_vel
@@ -41,6 +45,8 @@ from dataclasses import dataclass, field
 from typing import Any, Deque, Dict, Optional, Set
 
 # Attempt ROS 2 imports with informative error guidance
+HAS_NAV2 = False
+HAS_TF2 = False
 try:
     import rclpy
     from rclpy.action import ActionClient
@@ -66,6 +72,14 @@ try:
         HAS_NAV2 = False
         NavigateToPose = None
 
+    try:
+        from tf2_ros import Buffer, TransformListener
+        HAS_TF2 = True
+    except ImportError:
+        HAS_TF2 = False
+        Buffer = None
+        TransformListener = None
+
 except ImportError as e:
     print(f"[ERROR] Failed to import ROS 2 modules: {e}", file=sys.stderr)
     print("[INFO] Ensure you have sourced your ROS 2 environment: source ~/turtlebot_env.sh", file=sys.stderr)
@@ -80,8 +94,11 @@ except ImportError:
 
 WS_HOST = "0.0.0.0"
 WS_PORT = 8765
-EXPLORATION_LAUNCH_PATH = os.path.expanduser("~/turtlebot3_ws/launch/autonomous_exploration.launch.py")
+MAPPING_NAV_LAUNCH_PATH = os.path.expanduser("~/turtlebot3_ws/launch/control_center_mapping_navigation.launch.py")
+EXPLORATION_LAUNCH_PATH = os.path.expanduser("~/turtlebot3_ws/launch/frontier_explorer_only.launch.py")
 ENV_SCRIPT_PATH = os.path.expanduser("~/turtlebot_env.sh")
+MAP_FRAME = "map"
+BASE_FRAMES = ("base_link", "base_footprint")
 
 # Match src/lib/safety.ts — bridge is the authoritative cmd_vel clamp for LIVE.
 SAFE_LINEAR_MPS = 0.18
@@ -174,6 +191,21 @@ class TurtleBotBridgeNode:
             BatteryState, "/battery_state", self._on_battery, qos_profile_sensor_data
         )
 
+        # Map-frame pose is derived from TF rather than treating /odom coordinates as /map.
+        self.tf_buffer = None
+        self.tf_listener = None
+        self._latest_map_pose = None
+        self._latest_map_pose_lock = threading.Lock()
+        if HAS_TF2:
+            try:
+                self.tf_buffer = Buffer()
+                self.tf_listener = TransformListener(self.tf_buffer, self.node, spin_thread=False)
+                self._map_pose_timer = self.node.create_timer(0.10, self._update_map_pose_from_tf)
+            except Exception as exc:
+                self.logger.warn(f"TF2 map-pose listener unavailable: {exc}")
+                self.tf_buffer = None
+                self.tf_listener = None
+
         # 3. Real /map subscription (Transient Local QoS for latched maps)
         map_qos = QoSProfile(
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -184,6 +216,11 @@ class TurtleBotBridgeNode:
         self.map_sub = self.node.create_subscription(
             OccupancyGrid, "/map", self._on_map, map_qos
         )
+        self.plan_sub = self.node.create_subscription(Path, "/plan", self._on_plan, 10)
+        self.global_plan_sub = self.node.create_subscription(Path, "/global_plan", self._on_plan, 10)
+        self.local_plan_sub = self.node.create_subscription(Path, "/local_plan", self._on_local_plan, 10)
+        self.last_plan_broadcast = 0.0
+        self.last_local_plan_broadcast = 0.0
 
         # 4. Nav2 NavigateToPose ActionClient
         self.nav_client = None
@@ -214,6 +251,8 @@ class TurtleBotBridgeNode:
         self.exploration_state = "IDLE"
         self.explore_process: Optional[subprocess.Popen] = None
         self._explore_record: Optional[ExplorationProcessRecord] = None
+        self.mapping_process: Optional[subprocess.Popen] = None
+        self.mapping_process_started_by_bridge = False
 
         # Motion ownership: NONE, MANUAL, NAVIGATION, EXPLORATION.
         # Every acquisition/release is protected by one lock so no two motion sources
@@ -310,6 +349,108 @@ class TurtleBotBridgeNode:
     # --------------------------------------------------------------------------
     # Telemetry Callbacks
     # --------------------------------------------------------------------------
+    def _update_map_pose_from_tf(self):
+        """Cache the latest robot pose expressed in the authoritative map frame."""
+        if self.tf_buffer is None:
+            return
+        for base_frame in BASE_FRAMES:
+            try:
+                transform = self.tf_buffer.lookup_transform(
+                    MAP_FRAME, base_frame, rclpy.time.Time()
+                )
+                t = transform.transform.translation
+                q = transform.transform.rotation
+                siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+                cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+                yaw_rad = math.atan2(siny_cosp, cosy_cosp)
+                with self._latest_map_pose_lock:
+                    self._latest_map_pose = {
+                        "position": {"x": float(t.x), "y": float(t.y)},
+                        "yaw_rad": float(yaw_rad),
+                        "frame_id": MAP_FRAME,
+                        "base_frame": base_frame,
+                        "timestamp": time.time(),
+                    }
+                return
+            except Exception:
+                continue
+
+    def _get_latest_map_pose(self):
+        with self._latest_map_pose_lock:
+            if self._latest_map_pose is None:
+                return None
+            return dict(self._latest_map_pose)
+
+    def _path_payload(self, msg: Path):
+        """Return path points in the authoritative map frame when TF is available."""
+        frame_id = msg.header.frame_id or MAP_FRAME
+        if frame_id == MAP_FRAME:
+            return [
+                {"x": float(p.pose.position.x), "y": float(p.pose.position.y)}
+                for p in msg.poses
+            ]
+        if self.tf_buffer is None:
+            return []
+
+        try:
+            transform = self.tf_buffer.lookup_transform(
+                MAP_FRAME, frame_id, rclpy.time.Time()
+            ).transform
+            tx = float(transform.translation.x)
+            ty = float(transform.translation.y)
+            q = transform.rotation
+            siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+            cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+            yaw = math.atan2(siny_cosp, cosy_cosp)
+            cos_yaw = math.cos(yaw)
+            sin_yaw = math.sin(yaw)
+            return [
+                {
+                    "x": float(tx + cos_yaw * p.pose.position.x - sin_yaw * p.pose.position.y),
+                    "y": float(ty + sin_yaw * p.pose.position.x + cos_yaw * p.pose.position.y),
+                }
+                for p in msg.poses
+            ]
+        except Exception:
+            # Do not guess a coordinate frame. Returning raw points with the original
+            # frame marker lets the frontend keep the route out of the map overlay.
+            return []
+
+    def _on_plan(self, msg: Path):
+        now = time.time()
+        if now - self.last_plan_broadcast < 0.20:
+            return
+        self.last_plan_broadcast = now
+        frame_id = msg.header.frame_id or MAP_FRAME
+        self.broadcast({
+            "type": "nav_plan",
+            "navigation": {
+                "path": self._path_payload(msg),
+                "frame_id": MAP_FRAME if frame_id != MAP_FRAME else frame_id,
+                "source_frame_id": frame_id,
+                "plan_source": "global",
+            },
+        })
+
+    def _on_local_plan(self, msg: Path):
+        # Local controller paths are useful diagnostically but are not rendered as the
+        # primary route. Keep them separate so the UI never confuses controller output
+        # with the global Nav2 plan.
+        now = time.time()
+        if now - self.last_local_plan_broadcast < 0.20:
+            return
+        self.last_local_plan_broadcast = now
+        frame_id = msg.header.frame_id or MAP_FRAME
+        self.broadcast({
+            "type": "nav_local_plan",
+            "navigation": {
+                "path": self._path_payload(msg),
+                "frame_id": MAP_FRAME if frame_id != MAP_FRAME else frame_id,
+                "source_frame_id": frame_id,
+                "plan_source": "local",
+            },
+        })
+
     def _on_odom(self, msg: Odometry):
         now = time.time()
         if now - self.last_odom_broadcast < 0.05:  # max ~20 Hz
@@ -326,15 +467,16 @@ class TurtleBotBridgeNode:
             "type": "odom",
             "odometry": {
                 "position": {"x": pos.x, "y": pos.y},
-                # yaw_rad: raw ROS yaw in radians (0 = East/+X, positive CCW).
-                # The frontend converts this using rosYawToFrontendHeadingDeg()
-                # so that 0° = North, 90° = East matches the compass convention.
+                # Raw /odom yaw remains available for backward compatibility.
                 "yaw_rad": yaw_rad,
                 "linear_x": msg.twist.twist.linear.x,
                 "angular_z": msg.twist.twist.angular.z,
                 "orientation": {"x": ori.x, "y": ori.y, "z": ori.z, "w": ori.w},
             },
         }
+        map_pose = self._get_latest_map_pose()
+        if map_pose is not None:
+            payload["map_pose"] = map_pose
         self.broadcast(payload)
 
 
@@ -744,6 +886,12 @@ class TurtleBotBridgeNode:
         if not HAS_NAV2 or self.nav_client is None:
             self.logger.error("NavigateToPose requested but Nav2 action client is not available")
             self._broadcast_nav_status("FAILED", "Nav2 action client not available on ROS bridge")
+            return
+
+        map_pose = self._get_latest_map_pose()
+        if map_pose is None:
+            self.logger.warn("NavigateToPose rejected: no map->base TF is currently available")
+            self._broadcast_nav_status("FAILED", "No live map-frame robot pose available (map→base TF)")
             return
 
         # Atomic ownership acquisition happens before the server wait, so another motion
@@ -1209,7 +1357,7 @@ class TurtleBotBridgeNode:
         if self.loop is not None:
             asyncio.run_coroutine_threadsafe(self.resume_navigation_async(), self.loop)
 
-    def _broadcast_nav_status(self, state: str, detail: str = ""):
+    def _broadcast_nav_status(self, state: str, detail: str = "", status_code: Optional[int] = None):
         with self._nav_state_lock:
             goal = self.current_goal_pose if state in ("PLANNING", "NAVIGATING", "PAUSED", "CANCELING") else None
         payload = {
@@ -1217,6 +1365,7 @@ class TurtleBotBridgeNode:
             "navigation": {
                 "navigationState": state,
                 "detail": detail,
+                "status_code": status_code,
                 "goal": goal,
             },
         }
@@ -1263,8 +1412,91 @@ class TurtleBotBridgeNode:
             record.termination_event.set()
             return True
 
+    def _ensure_mapping_navigation_stack(self, timeout_sec: float = 25.0) -> bool:
+        """Ensure Cartographer + Nav2 are running without starting a frontier explorer."""
+        nav_client = getattr(self, "nav_client", None)
+        if nav_client is None:
+            return False
+
+        # If an external mapping/navigation launch is already active, reuse it.
+        try:
+            if nav_client.wait_for_server(timeout_sec=0.5):
+                return True
+        except Exception:
+            pass
+
+        if not os.path.exists(MAPPING_NAV_LAUNCH_PATH):
+            self.logger.error(f"Mapping/Nav2 launch file not found: {MAPPING_NAV_LAUNCH_PATH}")
+            return False
+
+        process = getattr(self, "mapping_process", None)
+        if process is not None and process.poll() is None:
+            return nav_client.wait_for_server(timeout_sec=min(timeout_sec, 20.0))
+
+        cmd = f"source {ENV_SCRIPT_PATH} && ros2 launch {MAPPING_NAV_LAUNCH_PATH}"
+        try:
+            process = subprocess.Popen(
+                ["bash", "-c", cmd],
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            self.mapping_process = process
+            self.mapping_process_started_by_bridge = True
+            self.logger.info(f"Mapping/Nav2 process started with PID: {process.pid}")
+        except Exception as exc:
+            self.logger.error(f"Failed to start Mapping/Nav2 stack: {exc}")
+            return False
+
+        deadline = time.monotonic() + timeout_sec
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                self.logger.error(f"Mapping/Nav2 process exited early with code {process.returncode}")
+                self.mapping_process = None
+                self.mapping_process_started_by_bridge = False
+                return False
+            try:
+                if nav_client.wait_for_server(timeout_sec=0.5):
+                    return True
+            except Exception:
+                pass
+        self.logger.error("Mapping/Nav2 stack did not expose /navigate_to_pose before timeout")
+        if self.mapping_process_started_by_bridge:
+            self._terminate_mapping_navigation_stack(timeout_sec=3.0)
+            self.mapping_process = None
+            self.mapping_process_started_by_bridge = False
+        return False
+
+    def _terminate_mapping_navigation_stack(self, timeout_sec: float = 8.0) -> bool:
+        process = getattr(self, "mapping_process", None)
+        if process is None or process.poll() is not None:
+            return True
+        try:
+            os.killpg(process.pid, signal.SIGINT)
+        except ProcessLookupError:
+            return True
+        except Exception as exc:
+            self.logger.warn(f"Mapping/Nav2 SIGINT warning: {exc}")
+        deadline = time.monotonic() + timeout_sec
+        while time.monotonic() < deadline and process.poll() is None:
+            time.sleep(0.1)
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and process.poll() is None:
+            time.sleep(0.1)
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        return process.poll() is not None
+
     def start_exploration(self):
-        """Launch the existing autonomous exploration stack as one supervised process group."""
+        """Launch only the frontier explorer after ensuring the mapping/Nav2 stack is alive."""
         if not self.accepting_commands:
             self.logger.warn("Exploration start rejected: no connected LIVE operator")
             self._broadcast_exploration_telemetry()
@@ -1313,7 +1545,7 @@ class TurtleBotBridgeNode:
                 return
 
             if not os.path.exists(EXPLORATION_LAUNCH_PATH):
-                self.logger.error(f"Exploration launch file not found: {EXPLORATION_LAUNCH_PATH}")
+                self.logger.error(f"Exploration-only launch file not found: {EXPLORATION_LAUNCH_PATH}")
                 self.exploration_state = "ERROR"
                 self._release_ownership(MOTION_EXPLORATION)
                 self._broadcast_exploration_telemetry()
@@ -1335,6 +1567,13 @@ class TurtleBotBridgeNode:
             self._explore_generation += 1
             current_generation = self._explore_generation
             self._explore_monitor_active = True
+
+            if not self._ensure_mapping_navigation_stack():
+                self.exploration_state = "ERROR"
+                self._explore_monitor_active = False
+                self._release_ownership(MOTION_EXPLORATION)
+                self._broadcast_exploration_telemetry()
+                return
 
             cmd = f"source {ENV_SCRIPT_PATH} && ros2 launch {EXPLORATION_LAUNCH_PATH}"
             process = None
@@ -1748,6 +1987,18 @@ class TurtleBotBridgeNode:
         with self._explore_lock:
             if self._explore_record is None or self._explore_record.termination_event.is_set():
                 self._release_ownership(MOTION_EXPLORATION)
+
+        mapping_terminal = True
+        if getattr(self, "mapping_process_started_by_bridge", False):
+            mapping_terminal = self._terminate_mapping_navigation_stack(timeout_sec=max(1.0, min(8.0, timeout_sec)))
+            if mapping_terminal:
+                self.mapping_process = None
+                self.mapping_process_started_by_bridge = False
+            else:
+                self.logger.error(
+                    "Bridge shutdown timed out waiting for the bridge-started Mapping/Nav2 stack; "
+                    "use the physical power switch as the final emergency stop"
+                )
         self._manual_watchdog_stop.set()
         self._nav_cancel_watchdog_stop.set()
         nav_terminal = nav_record is None or nav_record.result_event.is_set()
@@ -1760,7 +2011,7 @@ class TurtleBotBridgeNode:
             self.logger.error(
                 "Bridge shutdown timed out waiting for exploration termination; physical power switch remains the final emergency stop"
             )
-        return nav_terminal and explore_terminal
+        return nav_terminal and explore_terminal and mapping_terminal
 
     def _finalize_disconnect_cleanup(self, cleanup_gen: int):
         """Mark disconnect cleanup complete only after every tracked motion source is terminal."""
@@ -2328,10 +2579,14 @@ def main():
     ros_thread = threading.Thread(target=ros_spin, daemon=True)
     ros_thread.start()
 
-    # Start WebSocket async server
+    # Start WebSocket async server. Newer websockets releases require serve() to be
+    # constructed while the target asyncio loop is actively running.
     print(f"[INFO] Starting WebSocket server on {WS_HOST}:{WS_PORT}...")
-    start_server = websockets.serve(server.handler, WS_HOST, WS_PORT)
-    loop.run_until_complete(start_server)
+
+    async def start_websocket_server():
+        return await websockets.serve(server.handler, WS_HOST, WS_PORT)
+
+    start_server = loop.run_until_complete(start_websocket_server())
     print(f"[INFO] TurtleBot 3 Bridge is LIVE at ws://{WS_HOST}:{WS_PORT}")
 
     try:

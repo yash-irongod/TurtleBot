@@ -1,6 +1,7 @@
 import * as THREE from 'three'
 import type { LidarPoint, OccupancyGrid, Position2D } from '../../types/robot'
 import { DEMO_OBSTACLE_ITEMS } from '../../data/mapGrid'
+import { extractMapGeometry } from '../../lib/mapGeometry'
 
 /**
  * Real-Time Designated Boundary Manager:
@@ -29,8 +30,6 @@ function createDesignatedBoundaryManager(): DesignatedBoundaryManager {
   group.name = 'RealTime_Designated_Boundary_Forcefield'
 
   const shieldHeight = 0.35 // Proportionate height (Burger height is 0.19m)
-  let hasSlamMap = false
-  let lastGridSignature = ''
 
   // 1. Crystal-Clear Holographic Energy Texture Canvas
   const canvas = document.createElement('canvas')
@@ -197,7 +196,6 @@ function createDesignatedBoundaryManager(): DesignatedBoundaryManager {
     clearDynamicChildren()
 
     if (!isLive) {
-      hasSlamMap = false
       // DEMO mode: Build the 4 designated boundary walls around the demo arena
       const halfWidth = 3.5
       const halfDepth = 2.3
@@ -254,218 +252,24 @@ function createDesignatedBoundaryManager(): DesignatedBoundaryManager {
       return
     }
 
-    // LIVE mode: Construct designated boundary in real-time from the real ROS OccupancyGrid!
-    const w = grid.widthCells
-    const h = grid.heightCells
-    const res = grid.resolutionM
-    const origin = grid.origin
-    const cells = grid.cells
-
-    if (w <= 0 || h <= 0 || !cells || cells.length === 0) {
-      if (hasSlamMap) return
-      clearDynamicChildren()
-      buildAwaitingBoundary()
-      return
-    }
-
-    // Check if any occupied cells exist
-    let occupiedCount = 0
-    for (let i = 0; i < cells.length; i++) {
-      if (cells[i] === 'occupied') {
-        occupiedCount++
-      }
-    }
-
-    if (occupiedCount === 0) {
-      if (hasSlamMap) return
-      clearDynamicChildren()
-      buildAwaitingBoundary()
-      return
-    }
-
-    const sig = `${w}_${h}_${occupiedCount}_${origin.x.toFixed(2)}_${origin.y.toFixed(2)}`
-    if (sig === lastGridSignature) return
-    lastGridSignature = sig
-
-    clearDynamicChildren()
-
-    // 1. Cluster all occupied cells using BFS to separate Outer Perimeter Walls from Interior Objects
-    const visited = new Uint8Array(w * h)
-    const perimeterCellSet = new Set<number>()
-
-    for (let r = 0; r < h; r++) {
-      for (let c = 0; c < w; c++) {
-        const idx = r * w + c
-        if (cells[idx] !== 'occupied' || visited[idx]) continue
-
-        // Start BFS flood-fill for this cluster
-        visited[idx] = 1
-        const queue = [idx]
-        const clusterIndices = [idx]
-        let minC = c
-        let maxC = c
-        let minR = r
-        let maxR = r
-        let touchesUnknown = false
-
-        while (queue.length > 0) {
-          const curr = queue.shift()!
-          const currC = curr % w
-          const currR = Math.floor(curr / w)
-
-          // 8-neighborhood search
-          for (let dr = -1; dr <= 1; dr++) {
-            for (let dc = -1; dc <= 1; dc++) {
-              if (dr === 0 && dc === 0) continue
-              const nr = currR + dr
-              const nc = currC + dc
-
-              if (nc < 0 || nc >= w || nr < 0 || nr >= h) {
-                touchesUnknown = true
-                continue
-              }
-
-              const nIdx = nr * w + nc
-              const nState = cells[nIdx]
-
-              if (nState === 'unknown') {
-                touchesUnknown = true
-              } else if (nState === 'occupied' && !visited[nIdx]) {
-                visited[nIdx] = 1
-                queue.push(nIdx)
-                clusterIndices.push(nIdx)
-                minC = Math.min(minC, nc)
-                maxC = Math.max(maxC, nc)
-                minR = Math.min(minR, nr)
-                maxR = Math.max(maxR, nr)
-              }
-            }
-          }
-        }
-
-        const spanX = (maxC - minC + 1) * res
-        const spanZ = (maxR - minR + 1) * res
-
-        // An Interior Object is small (< 0.85m in both dims) and does NOT touch unknown space.
-        // It is an obstacle inside the room handled by obstacleManager, NOT an arena perimeter wall!
-        const isInteriorObject = spanX < 0.85 && spanZ < 0.85 && !touchesUnknown
-
-        if (!isInteriorObject) {
-          // Perimeter wall or large room partition
-          for (const cIdx of clusterIndices) {
-            perimeterCellSet.add(cIdx)
-          }
-        }
-      }
-    }
-
-    // 2. Extract boundary edges ONLY for perimeter wall cells that face free space (room interior)
-    const horizMap = new Map<number, Array<{ x1: number; x2: number }>>()
-    const vertMap = new Map<number, Array<{ z1: number; z2: number }>>()
-
-    const isFreeCell = (c: number, r: number) => {
-      if (c < 0 || c >= w || r < 0 || r >= h) return false
-      return cells[r * w + c] === 'free'
-    }
-
-    perimeterCellSet.forEach((idx) => {
-      const c = idx % w
-      const r = Math.floor(idx / w)
-      const wx = origin.x + c * res
-      const wz = origin.y + r * res
-
-      // North edge (z) facing free space
-      if (isFreeCell(c, r - 1)) {
-        const k = Math.round(wz * 1000)
-        if (!horizMap.has(k)) horizMap.set(k, [])
-        horizMap.get(k)!.push({ x1: wx, x2: wx + res })
-      }
-      // South edge (z + res) facing free space
-      if (isFreeCell(c, r + 1)) {
-        const k = Math.round((wz + res) * 1000)
-        if (!horizMap.has(k)) horizMap.set(k, [])
-        horizMap.get(k)!.push({ x1: wx, x2: wx + res })
-      }
-      // West edge (x) facing free space
-      if (isFreeCell(c - 1, r)) {
-        const k = Math.round(wx * 1000)
-        if (!vertMap.has(k)) vertMap.set(k, [])
-        vertMap.get(k)!.push({ z1: wz, z2: wz + res })
-      }
-      // East edge (x + res) facing free space
-      if (isFreeCell(c + 1, r)) {
-        const k = Math.round((wx + res) * 1000)
-        if (!vertMap.has(k)) vertMap.set(k, [])
-        vertMap.get(k)!.push({ z1: wz, z2: wz + res })
-      }
-    })
-
-    interface WallSegment {
-      x1: number
-      z1: number
-      x2: number
-      z2: number
-      len: number
-    }
-    const segments: WallSegment[] = []
-
-    horizMap.forEach((intervals, k) => {
-      const z = k / 1000
-      intervals.sort((a, b) => a.x1 - b.x1)
-      let current = intervals[0]
-      for (let i = 1; i < intervals.length; i++) {
-        const next = intervals[i]
-        if (next.x1 <= current.x2 + res * 0.4) {
-          current.x2 = Math.max(current.x2, next.x2)
-        } else {
-          const len = current.x2 - current.x1
-          if (len >= Math.max(0.20, res * 1.5)) {
-            segments.push({ x1: current.x1, z1: z, x2: current.x2, z2: z, len })
-          }
-          current = next
-        }
-      }
-      if (current) {
-        const len = current.x2 - current.x1
-        if (len >= Math.max(0.20, res * 1.5)) {
-          segments.push({ x1: current.x1, z1: z, x2: current.x2, z2: z, len })
-        }
-      }
-    })
-
-    vertMap.forEach((intervals, k) => {
-      const x = k / 1000
-      intervals.sort((a, b) => a.z1 - b.z1)
-      let current = intervals[0]
-      for (let i = 1; i < intervals.length; i++) {
-        const next = intervals[i]
-        if (next.z1 <= current.z2 + res * 0.4) {
-          current.z2 = Math.max(current.z2, next.z2)
-        } else {
-          const len = current.z2 - current.z1
-          if (len >= Math.max(0.20, res * 1.5)) {
-            segments.push({ x1: x, z1: current.z1, x2: x, z2: current.z2, len })
-          }
-          current = next
-        }
-      }
-      if (current) {
-        const len = current.z2 - current.z1
-        if (len >= Math.max(0.20, res * 1.5)) {
-          segments.push({ x1: x, z1: current.z1, x2: x, z2: current.z2, len })
-        }
-      }
-    })
+    // LIVE mode: classify the real OccupancyGrid using outside-connected unknown
+    // regions. Continuous occupied components that touch the mapped exterior become
+    // the arena boundary; compact interior components remain objects.
+    const geometry = extractMapGeometry(grid)
+    const segments = geometry.boundarySegments.map((segment) => ({
+      x1: segment.x1,
+      z1: segment.y1,
+      x2: segment.x2,
+      z2: segment.y2,
+      len: segment.lengthM,
+    }))
 
     if (segments.length === 0) {
-      hasSlamMap = false
       buildAwaitingBoundary()
       return
     }
 
-    hasSlamMap = true
-
-    // 4. Build unified 3D meshes for all perimeter wall segments
+    // Build one unified 3D mesh for the classified boundary segments.
     const positions: number[] = []
     const uvs: number[] = []
     const indices: number[] = []
@@ -482,12 +286,7 @@ function createDesignatedBoundaryManager(): DesignatedBoundaryManager {
         x1, shieldHeight, z1
       )
       const uMax = Math.max(1, len * 1.5)
-      uvs.push(
-        0, 0,
-        uMax, 0,
-        uMax, 1,
-        0, 1
-      )
+      uvs.push(0, 0, uMax, 0, uMax, 1, 0, 1)
       indices.push(
         vertOffset, vertOffset + 1, vertOffset + 2,
         vertOffset, vertOffset + 2, vertOffset + 3,
@@ -495,10 +294,7 @@ function createDesignatedBoundaryManager(): DesignatedBoundaryManager {
         vertOffset, vertOffset + 3, vertOffset + 2
       )
       vertOffset += 4
-
-      // Top laser rail
       railPositions.push(x1, shieldHeight, z1, x2, shieldHeight, z2)
-      // Ground footing seam
       footPositions.push(x1, 0.005, z1, x2, 0.005, z2)
     })
 
@@ -507,41 +303,32 @@ function createDesignatedBoundaryManager(): DesignatedBoundaryManager {
     wallGeo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2))
     wallGeo.setIndex(indices)
     wallGeo.computeVertexNormals()
-
-    const wallMesh = new THREE.Mesh(wallGeo, wallMaterial)
-    group.add(wallMesh)
+    group.add(new THREE.Mesh(wallGeo, wallMaterial))
 
     const railGeo = new THREE.BufferGeometry()
     railGeo.setAttribute('position', new THREE.Float32BufferAttribute(railPositions, 3))
-    const railLines = new THREE.LineSegments(railGeo, topRailMat)
-    group.add(railLines)
+    group.add(new THREE.LineSegments(railGeo, topRailMat))
 
     const footGeo = new THREE.BufferGeometry()
     footGeo.setAttribute('position', new THREE.Float32BufferAttribute(footPositions, 3))
-    const footLines = new THREE.LineSegments(footGeo, footingRailMat)
-    group.add(footLines)
+    group.add(new THREE.LineSegments(footGeo, footingRailMat))
 
-    // 5. Corner energy pylons: identify corners where long perimeter walls join (>= 0.5m each)
-    const longSegments = segments.filter((s) => s.len >= 0.45)
+    // Add corner pylons only where substantial boundary segments actually meet.
+    const longSegments = segments.filter((segment) => segment.len >= 0.45)
     const corners: Array<[number, number]> = []
-
     for (let i = 0; i < longSegments.length; i++) {
-      const s1 = longSegments[i]
+      const first = longSegments[i]
       for (let j = i + 1; j < longSegments.length; j++) {
-        const s2 = longSegments[j]
-        // Check if endpoints meet
-        const endpoints1: Array<[number, number]> = [[s1.x1, s1.z1], [s1.x2, s1.z2]]
-        const endpoints2: Array<[number, number]> = [[s2.x1, s2.z1], [s2.x2, s2.z2]]
-
-        for (const [p1x, p1z] of endpoints1) {
-          for (const [p2x, p2z] of endpoints2) {
-            const dist = Math.hypot(p1x - p2x, p1z - p2z)
-            if (dist < res * 1.5) {
-              const cx = (p1x + p2x) * 0.5
-              const cz = (p1z + p2z) * 0.5
-              // Minimum distance to any existing placed corner (>= 1.0m)
-              const tooClose = corners.some(([ex, ez]) => Math.hypot(cx - ex, cz - ez) < 1.0)
-              if (!tooClose && corners.length < 12) {
+        const second = longSegments[j]
+        const firstEnds = [[first.x1, first.z1], [first.x2, first.z2]]
+        const secondEnds = [[second.x1, second.z1], [second.x2, second.z2]]
+        for (const [x1, z1] of firstEnds) {
+          for (const [x2, z2] of secondEnds) {
+            const dist = Math.hypot(x1 - x2, z1 - z2)
+            if (dist < grid.resolutionM * 1.5) {
+              const cx = (x1 + x2) * 0.5
+              const cz = (z1 + z2) * 0.5
+              if (!corners.some(([ex, ez]) => Math.hypot(cx - ex, cz - ez) < 1.0) && corners.length < 12) {
                 corners.push([cx, cz])
               }
             }
@@ -549,10 +336,7 @@ function createDesignatedBoundaryManager(): DesignatedBoundaryManager {
         }
       }
     }
-
-    corners.forEach(([cx, cz]) => {
-      group.add(createPylon(cx, cz))
-    })
+    corners.forEach(([cx, cz]) => group.add(createPylon(cx, cz)))
   }
 
   /**
@@ -1377,93 +1161,41 @@ function createRealTimeObstacleManager(loader: THREE.TextureLoader) {
       return
     }
 
-    // In LIVE mode: Instantiate the designed 3D disaster obstacles at real mapped obstacle positions
-    const w = grid.widthCells
-    const h = grid.heightCells
-    const res = grid.resolutionM
-    const origin = grid.origin
-    const cells = grid.cells
-
-    if (w <= 0 || h <= 0 || !cells || cells.length === 0) return
-
-    const visited = new Uint8Array(w * h)
+    // In LIVE mode: turn compact interior map components into semantic 3D obstacle props.
+    const geometry = extractMapGeometry(grid)
     const newObstacleKeys = new Set<string>()
 
-    for (let r = 0; r < h; r++) {
-      for (let c = 0; c < w; c++) {
-        const idx = r * w + c
-        if (cells[idx] !== 'occupied' || visited[idx]) continue
+    for (const obstacle of geometry.obstacles) {
+      const cx = obstacle.center.x
+      const cz = obstacle.center.y
+      const key = `${cx.toFixed(2)}_${cz.toFixed(2)}`
+      newObstacleKeys.add(key)
 
-        visited[idx] = 1
-        const queue = [idx]
-        let minC = c
-        let maxC = c
-        let minR = r
-        let maxR = r
-        let touchesUnknown = false
-        let count = 1
-
-        while (queue.length > 0) {
-          const curr = queue.shift()!
-          const currC = curr % w
-          const currR = Math.floor(curr / w)
-
-          for (let dr = -1; dr <= 1; dr++) {
-            for (let dc = -1; dc <= 1; dc++) {
-              if (dr === 0 && dc === 0) continue
-              const nr = currR + dr
-              const nc = currC + dc
-              if (nc < 0 || nc >= w || nr < 0 || nr >= h) {
-                touchesUnknown = true
-                continue
-              }
-              const nIdx = nr * w + nc
-              const nState = cells[nIdx]
-              if (nState === 'unknown') {
-                touchesUnknown = true
-              } else if (nState === 'occupied' && !visited[nIdx]) {
-                visited[nIdx] = 1
-                queue.push(nIdx)
-                count++
-                minC = Math.min(minC, nc)
-                maxC = Math.max(maxC, nc)
-                minR = Math.min(minR, nr)
-                maxR = Math.max(maxR, nr)
-              }
-            }
-          }
+      if (!liveObstacleKeys.has(key)) {
+        liveObstacleKeys.add(key)
+        const hash = Math.abs(Math.round(cx * 10) * 19 + Math.round(cz * 10) * 7) % 5
+        let obj: THREE.Group
+        const obstacleSize = Math.max(obstacle.widthM, obstacle.heightM)
+        if (hash === 0) {
+          obj = createSafetyConeGroup(cx, cz, 0)
+        } else if (hash === 1) {
+          obj = createFallenDrum(cx, cz, 0, 0.22)
+        } else if (hash === 2) {
+          obj = createUprightDrum(cx, cz, 0.0)
+        } else if (hash === 3) {
+          obj = createSlabWithRebar(
+            cx,
+            cz,
+            Math.min(0.60, Math.max(0.32, obstacleSize)),
+            0.12,
+            Math.min(0.45, Math.max(0.24, obstacleSize * 0.8)),
+            0.35,
+          )
+        } else {
+          obj = createTiltedEmergingPipe(cx, cz, 0.12, 0.55, 0.48, -0.35)
         }
-
-        const spanX = (maxC - minC + 1) * res
-        const spanZ = (maxR - minR + 1) * res
-
-        // An interior obstacle is small (< 0.85m in both directions) and surrounded by free space
-        if (spanX < 0.85 && spanZ < 0.85 && !touchesUnknown && count >= 2) {
-          const cx = origin.x + (minC + maxC + 1) * 0.5 * res
-          const cz = origin.y + (minR + maxR + 1) * 0.5 * res
-          const key = `${cx.toFixed(1)}_${cz.toFixed(1)}`
-          newObstacleKeys.add(key)
-
-          if (!liveObstacleKeys.has(key)) {
-            liveObstacleKeys.add(key)
-            // Deterministically select the designed 3D disaster model for this position
-            const hash = Math.abs(Math.round(cx * 10) * 19 + Math.round(cz * 10) * 7) % 5
-            let obj: THREE.Group
-            if (hash === 0) {
-              obj = createSafetyConeGroup(cx, cz, (hash * 0.7) % Math.PI)
-            } else if (hash === 1) {
-              obj = createFallenDrum(cx, cz, (hash * 0.8) % Math.PI, 0.22)
-            } else if (hash === 2) {
-              obj = createUprightDrum(cx, cz, (hash * 0.5) % Math.PI)
-            } else if (hash === 3) {
-              obj = createSlabWithRebar(cx, cz, Math.min(0.48, Math.max(0.32, spanX)), 0.12, Math.min(0.35, Math.max(0.24, spanZ)), hash * 0.4)
-            } else {
-              obj = createTiltedEmergingPipe(cx, cz, 0.12, 0.55, 0.48, -0.35)
-            }
-            obj.name = `live_obstacle_${key}`
-            rootGroup.add(obj)
-          }
-        }
+        obj.name = `live_obstacle_${key}`
+        rootGroup.add(obj)
       }
     }
 

@@ -26,22 +26,34 @@ The bridge listens on `0.0.0.0:8765` and does not implement TLS or operator auth
 
 ## How to Deploy on the Ubuntu VM (192.168.0.112)
 
-1. Copy `bridge.py` to `~/turtlebot_bridge/bridge.py` on the VM:
+1. Copy `bridge.py` to `~/turtlebot_bridge/bridge.py` and copy the two launch files to
+   `~/turtlebot3_ws/launch/`:
    ```bash
-   mkdir -p ~/turtlebot_bridge
-   cp bridge.py ~/turtlebot_bridge/bridge.py
+   mkdir -p ~/turtlebot_bridge ~/turtlebot3_ws/launch
    chmod +x ~/turtlebot_bridge/bridge.py
    ```
 
-2. Ensure dependencies are installed:
+2. Ensure the Python WebSocket dependency is installed:
    ```bash
    pip install websockets
    ```
 
-3. Run the bridge:
+3. For manual mapping, start only the mapping/navigation launch file first:
+   ```bash
+   source ~/turtlebot_env.sh
+   ros2 launch ~/turtlebot3_ws/launch/control_center_mapping_navigation.launch.py
+   ```
+
+4. Start the bridge in a second terminal:
    ```bash
    source ~/turtlebot_env.sh
    python3 ~/turtlebot_bridge/bridge.py
    ```
 
-4. The frontend connects automatically to `ws://192.168.0.112:8765`.
+5. For Auto Explore, the bridge will ensure the mapping/navigation stack is alive and
+   supervise only `frontier_explorer_only.launch.py`. Do not use the older combined
+   `autonomous_exploration.launch.py` with this bridge: that file bundles Cartographer,
+   Nav2, and Frontier Explorer into one process tree, so stopping it also stops mapping
+   and navigation.
+
+6. The frontend connects automatically to `ws://192.168.0.112:8765`.

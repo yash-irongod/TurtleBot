@@ -117,7 +117,8 @@ function parseBridgePayload(raw: any, current: RobotTelemetry): RobotTelemetry {
 
   let odometry: OdometryState = current.odometry
   if (rawOdom) {
-    const rawPos = rawOdom.position ?? rawOdom.pose?.pose?.position ?? rawOdom.pose?.position ?? rawOdom
+    const rawMapPose = data.map_pose ?? rawOdom.map_pose
+    const rawPos = rawMapPose?.position ?? rawOdom.position ?? rawOdom.pose?.pose?.position ?? rawOdom.pose?.position ?? rawOdom
     const rawX =
       typeof rawPos.x === 'number'
         ? rawPos.x
@@ -134,12 +135,13 @@ function parseBridgePayload(raw: any, current: RobotTelemetry): RobotTelemetry {
     // Convert ROS REP-103 (+X East, +Y North) to frontend presentation (+X East, -Y North)
     const position = rosToFrontendPosition(rawX, rawY)
 
-    // Heading: bridge sends yaw_rad (preferred, added to fix coordinate mismatch) or
+    // Prefer TF-derived map-frame yaw. Fall back to raw /odom yaw if TF is unavailable.
     // headingDeg (legacy, 0=East ROS convention). Both need rosYawToFrontendHeadingDeg
     // to produce frontend compass bearing: 0°=North, 90°=East, increases CW.
     let headingDeg = odometry.headingDeg
-    if (typeof rawOdom.yaw_rad === 'number') {
-      // Preferred path: raw ROS yaw in radians → frontend compass bearing
+    if (typeof rawMapPose?.yaw_rad === 'number') {
+      headingDeg = rosYawToFrontendHeadingDeg(rawMapPose.yaw_rad)
+    } else if (typeof rawOdom.yaw_rad === 'number') {
       headingDeg = rosYawToFrontendHeadingDeg(rawOdom.yaw_rad)
     } else if (typeof rawOdom.headingDeg === 'number') {
       // Legacy path: bridge sent degrees in ROS convention (0=East) — convert
@@ -596,6 +598,23 @@ export function createRosRobotDataSource(options: RosRobotDataSourceOptions = {}
             return
           }
 
+          if (msgType === 'nav_plan') {
+            const nav = raw.navigation ?? raw
+            const nextPath = Array.isArray(nav.path)
+              ? nav.path.map((point: any) => rosToFrontendPosition(point.x, point.y))
+              : []
+            notifyNav({
+              ...navInfo,
+              path: nextPath,
+              detail: typeof nav.detail === 'string' ? nav.detail : navInfo.detail,
+            })
+            return
+          }
+
+          if (msgType === 'nav_local_plan') {
+            return
+          }
+
           if (msgType === 'nav_status' || msgType === 'nav_feedback' || msgType === 'nav_result') {
             const nav = raw.navigation ?? raw
             const nextState: NavigationState = nav.navigationState ?? nav.state ?? navInfo.navigationState
@@ -639,6 +658,8 @@ export function createRosRobotDataSource(options: RosRobotDataSourceOptions = {}
               path: nextPath,
               distanceRemainingM,
               progressPct: nextState === 'GOAL_REACHED' ? 100 : 0,
+              detail: typeof nav.detail === 'string' ? nav.detail : navInfo.detail,
+              statusCode: typeof nav.status_code === 'number' ? nav.status_code : navInfo.statusCode,
             })
             return
           }

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState, type Keyboard
 import { useRobot } from '../../context/RobotContext'
 import { demoOccupancyGrid } from '../../data/mapGrid'
 import { fixed } from '../../lib/format'
+import { extractMapGeometry } from '../../lib/mapGeometry'
 import { GlassPanel } from '../common/GlassPanel'
 import { MicroLabel } from '../common/MicroLabel'
 import { RobotGlyph } from '../robot/RobotGlyph'
@@ -81,8 +82,24 @@ function cellStateAt(position: Position2D, grid: OccupancyGrid) {
   return grid.cells[row * grid.widthCells + col]
 }
 
-function isFreeGoalPosition(position: Position2D, grid: OccupancyGrid) {
-  return cellStateAt(position, grid) === 'free'
+function isFreeGoalPosition(position: Position2D, grid: OccupancyGrid, clearanceM = 0.26) {
+  if (cellStateAt(position, grid) !== 'free') return false
+
+  const radiusCells = Math.max(1, Math.ceil(clearanceM / grid.resolutionM))
+  const centerCol = Math.floor((position.x - grid.origin.x) / grid.resolutionM)
+  const centerRow = Math.floor((position.y - grid.origin.y) / grid.resolutionM)
+
+  for (let dr = -radiusCells; dr <= radiusCells; dr++) {
+    for (let dc = -radiusCells; dc <= radiusCells; dc++) {
+      if (Math.hypot(dc * grid.resolutionM, dr * grid.resolutionM) > clearanceM) continue
+      const c = centerCol + dc
+      const r = centerRow + dr
+      if (c < 0 || c >= grid.widthCells || r < 0 || r >= grid.heightCells) return false
+      if (grid.cells[r * grid.widthCells + c] !== 'free') return false
+    }
+  }
+
+  return true
 }
 
 /**
@@ -105,6 +122,10 @@ export function WorldMap({ compact = false, variant = 'standard', className, onT
   const isAwaitingLiveMap = isLive && !liveOccupancyGrid
   const emptyLiveGrid = useMemo(() => createEmptyOccupancyGrid(), [])
   const grid = isLive && !liveOccupancyGrid ? emptyLiveGrid : (liveOccupancyGrid ?? demoOccupancyGrid)
+  const mapGeometry = useMemo(
+    () => (isLive && liveOccupancyGrid ? extractMapGeometry(liveOccupancyGrid) : { boundarySegments: [], obstacles: [] }),
+    [isLive, liveOccupancyGrid],
+  )
   const instanceId = useId().replace(/:/g, '')
   const glowId = `${instanceId}-map-glow`
   const gridPatternId = `${instanceId}-map-grid`
@@ -438,6 +459,59 @@ export function WorldMap({ compact = false, variant = 'standard', className, onT
             cellRects
           )}
 
+          {isLive && mapGeometry.boundarySegments.length > 0 && (
+            <g pointerEvents="none" aria-label="Detected live map boundary">
+              {mapGeometry.boundarySegments.map((segment, index) => {
+                const p1 = worldToPx({ x: segment.x1, y: segment.y1 }, grid)
+                const p2 = worldToPx({ x: segment.x2, y: segment.y2 }, grid)
+                return (
+                  <g key={`boundary-${index}`}>
+                    <line
+                      x1={p1.x}
+                      y1={p1.y}
+                      x2={p2.x}
+                      y2={p2.y}
+                      className="stroke-critical-500/20"
+                      strokeWidth={5.5}
+                      strokeLinecap="round"
+                    />
+                    <line
+                      x1={p1.x}
+                      y1={p1.y}
+                      x2={p2.x}
+                      y2={p2.y}
+                      className="stroke-critical-400/90"
+                      strokeWidth={1.9}
+                      strokeLinecap="round"
+                    />
+                  </g>
+                )
+              })}
+            </g>
+          )}
+
+          {isLive && mapGeometry.obstacles.length > 0 && (
+            <g pointerEvents="none" aria-label="Detected live interior obstacles">
+              {mapGeometry.obstacles.map((obstacle, index) => {
+                const topLeft = worldToPx(obstacle.min, grid)
+                const bottomRight = worldToPx(obstacle.max, grid)
+                return (
+                  <rect
+                    key={`obstacle-${index}`}
+                    x={topLeft.x}
+                    y={topLeft.y}
+                    width={Math.max(2, bottomRight.x - topLeft.x)}
+                    height={Math.max(2, bottomRight.y - topLeft.y)}
+                    rx={2}
+                    className="fill-amber-400/[0.05] stroke-amber-400/55"
+                    strokeWidth={1.2}
+                    strokeDasharray="4 3"
+                  />
+                )
+              })}
+            </g>
+          )}
+
           <line x1={viewW / 2} y1={0} x2={viewW / 2} y2={viewH} className="stroke-signal-400/[0.10]" strokeWidth={1} />
           <line x1={0} y1={viewH / 2} x2={viewW} y2={viewH} className="stroke-signal-400/[0.10]" strokeWidth={1} />
           <text x={10} y={18} className="fill-ink-500 font-mono text-[9px] tracking-[0.16em]">
@@ -552,7 +626,7 @@ export function WorldMap({ compact = false, variant = 'standard', className, onT
 
       {canEditMapGoal && (
         <p id={goalInteractionHintId} className="sr-only" aria-live="polite">
-          {goalEditHint}. Only free cells accept a {isLive ? 'live' : 'demo'} goal.
+          {goalEditHint}. Only mapped free cells with robot clearance accept a {isLive ? 'live' : 'demo'} goal.
           {isLive
             ? ' Moving a target replaces the current goal and requires Start.'
             : ' Moving a target returns demo navigation to Ready and requires Start.'}

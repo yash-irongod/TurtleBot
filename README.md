@@ -87,17 +87,42 @@ switching mode, or the e-stop engaging all immediately zero the commanded
 velocity, and OS key-repeat is explicitly ignored so a key still held down
 can't silently re-arm movement the instant an e-stop is reset.
 
-## Running the ROS 2 bridge
+## Running the ROS 2 stack and bridge
 
-The WebSocket bridge runs on the robot (or a machine with ROS 2 access):
+The WebSocket bridge runs on the robot (or a machine with ROS 2 access). For this
+project, keep mapping/navigation separate from frontier exploration so stopping an
+exploration run does not tear down Cartographer or Nav2.
+
+### Manual SLAM mapping + later Nav2
+
+Start the persistent mapping/navigation stack in one Ubuntu terminal:
 
 ```bash
 source ~/turtlebot_env.sh
-python3 ros_bridge/bridge.py
+ros2 launch ~/turtlebot3_ws/launch/control_center_mapping_navigation.launch.py
 ```
 
-It serves on `ws://0.0.0.0:8765`. The frontend connects via `?source=live` or
-the stored preference. Keep this port on a trusted/isolated network; transport encryption/authentication is not implemented in this demo bridge.
+Then start the bridge in a second terminal:
+
+```bash
+source ~/turtlebot_env.sh
+python3 ~/turtlebot_bridge/bridge.py
+```
+
+In the Control Center, open `?source=live`, choose **Manual → SLAM Mapping**, and
+drive with WASD while Cartographer updates the real `/map`. When the arena is mapped,
+switch to **Autonomous**, place a clear target, and start Nav2. The bridge publishes
+the map-frame robot pose from TF and the current Nav2 route when the ROS stack provides it.
+
+### Auto Explore
+
+The bridge can start the same mapping/navigation stack automatically, then launch only
+`frontier_explorer_only.launch.py`. Stopping Auto Explore therefore leaves Cartographer
+and Nav2 alive for a subsequent manual target-navigation demonstration.
+
+It serves on `ws://0.0.0.0:8765`. The frontend connects via `?source=live` or the stored
+preference. Keep this port on a trusted/isolated network; transport encryption/authentication
+is not implemented in this demo bridge.
 
 ## Connecting a real robot
 
