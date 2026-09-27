@@ -163,15 +163,14 @@ export function extractMapGeometry(grid: OccupancyGrid): MapGeometry {
     const heightM = (component.maxR - component.minR + 1) * res
     const maxSpanM = Math.max(widthM, heightM)
 
-    // Further/continuous lines read as border:
-    // Long runs (span >= minBoundarySpanM) or large clusters (>= 20 cells)
-    const isContinuousLine = maxSpanM >= minBoundarySpanM || component.cells.length >= 20
-
-    if (isContinuousLine) {
-      boundaryComponents.push(component)
-    } else if (widthM <= 1.25 && heightM <= 1.25) {
-      // Relatively closer, compact clusters read as objects (even if LiDAR cast an
-      // unmapped unknown shadow behind them connecting to the edge).
+    // Visual classification pipeline:
+    // 1. If component does NOT touch outside unknown / map edge -> Interior obstacle.
+    //    Surrounded by explored space (e.g. tables, chairs, columns, dividers).
+    // 2. If component DOES touch outside unknown / map edge:
+    //    - If sufficiently continuous (span >= minBoundarySpanM or >= 20 cells) -> Perimeter boundary wall.
+    //    - If compact cluster (width & height <= 1.5m, >= 3 cells) -> Peripheral obstacle near mapped boundary.
+    //    - Otherwise -> Small wall fragment or frontier sensor noise.
+    if (!component.touchesOutside) {
       const center = {
         x: origin.x + (component.minC + component.maxC + 1) * 0.5 * res,
         y: origin.y + (component.minR + component.maxR + 1) * 0.5 * res,
@@ -184,6 +183,25 @@ export function extractMapGeometry(grid: OccupancyGrid): MapGeometry {
         heightM,
         cellCount: component.cells.length,
       })
+    } else {
+      const isContinuousLine = maxSpanM >= minBoundarySpanM || component.cells.length >= 20
+
+      if (isContinuousLine) {
+        boundaryComponents.push(component)
+      } else if (widthM <= 1.5 && heightM <= 1.5 && component.cells.length >= 3) {
+        const center = {
+          x: origin.x + (component.minC + component.maxC + 1) * 0.5 * res,
+          y: origin.y + (component.minR + component.maxR + 1) * 0.5 * res,
+        }
+        obstacles.push({
+          center,
+          min: { x: origin.x + component.minC * res, y: origin.y + component.minR * res },
+          max: { x: origin.x + (component.maxC + 1) * res, y: origin.y + (component.maxR + 1) * res },
+          widthM,
+          heightM,
+          cellCount: component.cells.length,
+        })
+      }
     }
   }
 
