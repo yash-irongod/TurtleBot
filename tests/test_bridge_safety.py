@@ -659,6 +659,8 @@ class MapProvenanceTests(unittest.TestCase):
         self.assertIs(node._latest_map_payload, raw)
         self.assertIsNotNone(node._latest_optimized_map_payload)
         self.assertIsNot(node._latest_optimized_map_payload, raw)
+        self.assertEqual(node._latest_map_payload.get("type"), "map")
+        self.assertEqual(node._latest_optimized_map_payload.get("type"), "optimized_map")
 
 
 class SourceSwitchRaceTests(unittest.TestCase):

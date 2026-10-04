@@ -342,6 +342,7 @@ class TurtleBotBridgeNode:
         self.last_imu_broadcast = 0.0
         self.last_map_broadcast = 0.0
         self.last_battery_broadcast = 0.0
+        self._last_opt_map_broadcast = 0.0
 
         self.logger.info("Bridge Node initialized successfully.")
 
@@ -602,11 +603,17 @@ class TurtleBotBridgeNode:
         self._broadcast_map_payload(payload)
 
     def _on_optimized_map(self, msg: OccupancyGrid):
-        # Optimized exploration maps may still be useful to the existing UI, but they are
-        # not treated as the authoritative /map snapshot sent during operator handshake.
+        # Optimized exploration maps are NOT authoritative. They use a distinct message
+        # type so the frontend never confuses them with /map, and a separate throttle
+        # timer so they don't steal /map's 1 Hz broadcast window.
         payload = self._build_map_payload(msg)
+        payload["type"] = "optimized_map"
         self._latest_optimized_map_payload = payload
-        self._broadcast_map_payload(payload)
+        now = time.time()
+        if now - getattr(self, "_last_opt_map_broadcast", 0.0) < 1.0:
+            return
+        self._last_opt_map_broadcast = now
+        self.broadcast(payload)
 
     # --------------------------------------------------------------------------
     # Frontier Explorer Callbacks

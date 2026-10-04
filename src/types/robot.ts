@@ -131,6 +131,8 @@ export interface Waypoint {
   id: string
   label: string
   position: Position2D
+  /** Goal orientation in frontend heading degrees (0=North/up, CW positive). */
+  goalHeadingDeg?: number
   status: 'pending' | 'active' | 'reached'
 }
 
@@ -163,8 +165,16 @@ export interface NavigationInfo {
   navigationState: NavigationState
   goal: Waypoint | null
   path: Position2D[]
+  /** Local controller plan from Nav2 (shorter, near-robot). Empty when unavailable. */
+  localPath: Position2D[]
   distanceRemainingM: number
   progressPct: number
+  /** Coordinate frame of the global path (e.g. "map"). */
+  globalPathFrame?: string
+  /** Coordinate frame of the local path (e.g. "map", "odom"). */
+  localPathFrame?: string
+  /** Monotonically increasing revision counter for plan updates. */
+  planRevision?: number
   /** Last backend navigation detail, primarily useful for LIVE/Nav2 diagnostics. */
   detail?: string
   /** Raw action_msgs/GoalStatus code when the bridge has one. */

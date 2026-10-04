@@ -72,6 +72,7 @@ export function Drive3DView({
   // P1: Track previous route path to avoid rebuilding geometry every frame
   const prevPathRef = useRef<Position2D[] | null>(null)
   const pathSignatureRef = useRef<string>('')
+  const localPathSigRef = useRef<string>('')
 
   // P1: Stable empty occupancy grid reference - create once, not per frame
   const emptyGridRef = useRef<OccupancyGrid>(null as unknown as OccupancyGrid)
@@ -237,24 +238,41 @@ export function Drive3DView({
         turtlebot.update(dt, kPose.linearVelocity, kPose.angularVelocity, kPose.pitchRad, kPose.rollRad)
 
         // C. Update Route, Goal, Frontier, and 360° LiDAR visuals
-        const hasActiveGoal = Boolean(nav?.goal && (nav?.navigationState === 'NAVIGATING' || nav?.navigationState === 'PAUSED'))
+        const terminalStates: string[] = ['IDLE', 'CANCELED', 'FAILED', 'GOAL_REACHED']
+        const hasActiveGoal = Boolean(nav?.goal && nav.navigationState && !terminalStates.includes(nav.navigationState))
         if (hasActiveGoal && nav?.goal) {
-          environment.setGoalPosition(nav.goal.position)
+          environment.setGoalPosition(nav.goal.position, nav.goal.goalHeadingDeg)
 
           // P1: Only rebuild route geometry when path actually changes.
-          // Compare serialized point signature to avoid 60fps rebuilds.
+          // Fast compact signature: length + start + mid + end avoids massive per-frame string allocations
           const nextPath = nav.path && nav.path.length >= 2 ? nav.path : []
-          const pathSig = nextPath.map(p => `${p.x.toFixed(3)},${p.y.toFixed(3)}`).join(';')
+          const pathSig = nextPath.length >= 2
+            ? `${nav.planRevision ?? 0}:${nextPath.length}:${nextPath[0].x.toFixed(2)},${nextPath[0].y.toFixed(2)}:${nextPath[nextPath.length - 1].x.toFixed(2)},${nextPath[nextPath.length - 1].y.toFixed(2)}`
+            : ''
           if (pathSig !== pathSignatureRef.current) {
             pathSignatureRef.current = pathSig
             prevPathRef.current = nextPath
             environment.setRoutePath(nextPath)
+          }
+
+          // Update local controller path if available
+          const nextLocal = nav.localPath && nav.localPath.length >= 2 ? nav.localPath : []
+          const localSig = nextLocal.length >= 2
+            ? `${nextLocal.length}:${nextLocal[0].x.toFixed(2)},${nextLocal[0].y.toFixed(2)}:${nextLocal[nextLocal.length - 1].x.toFixed(2)},${nextLocal[nextLocal.length - 1].y.toFixed(2)}`
+            : ''
+          if (localSig !== localPathSigRef.current) {
+            localPathSigRef.current = localSig
+            environment.setLocalPath(nextLocal)
           }
         } else {
           environment.setGoalPosition(null)
           if (pathSignatureRef.current !== '') {
             pathSignatureRef.current = ''
             environment.setRoutePath([])
+          }
+          if (localPathSigRef.current !== '') {
+            localPathSigRef.current = ''
+            environment.setLocalPath([])
           }
         }
 
@@ -266,8 +284,8 @@ export function Drive3DView({
           environment.setFrontierTarget(null)
         }
 
-        // D. Update dynamic chase camera
-        driveCamera.update(dt, kPose.position, kPose.headingDeg, kPose.linearVelocity, kPose.angularVelocity)
+        // D. Update dynamic chase camera with route-aware framing
+        driveCamera.update(dt, kPose.position, kPose.headingDeg, kPose.linearVelocity, kPose.angularVelocity, nav?.goal?.position)
         environment.updateLidarPoints(telemetryRef.current.lidar.points, kPose.position, kPose.headingDeg)
         environment.update(dt, kPose.position, kPose.linearVelocity, driveCamera.camera.position)
 

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { NavigationInfo, Position2D, Waypoint } from '../types/robot'
 import { WAYPOINTS } from '../data/waypoints'
 
-const INITIAL: NavigationInfo = { navigationState: 'IDLE', goal: null, path: [], distanceRemainingM: 0, progressPct: 0 }
+const INITIAL: NavigationInfo = { navigationState: 'IDLE', goal: null, path: [], localPath: [], distanceRemainingM: 0, progressPct: 0 }
 
 const PLANNING_MS = 900
 const PROGRESS_TICK_MS = 400
@@ -64,6 +64,7 @@ export function useNavigationDemo({ enabled, getCurrentPosition }: UseNavigation
         navigationState: 'READY',
         goal: { ...goal, position: { ...goal.position }, status: 'pending' },
         path: [],
+        localPath: [],
         distanceRemainingM: distanceBetween(start, goal.position),
         progressPct: 0,
       })

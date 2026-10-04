@@ -61,7 +61,10 @@ export function DriveHud({
   const goal = navigation?.goal
   const distance = navigation?.distanceRemainingM ?? 0
   const progress = Math.max(0, Math.min(100, navigation?.progressPct ?? 0))
-  const isNavigatingWithGoal = Boolean(goal && navigation?.navigationState === 'NAVIGATING')
+  const terminalNavStates: (NavigationState | string)[] = ['IDLE', 'CANCELED', 'FAILED', 'GOAL_REACHED']
+  const isNavigatingWithGoal = Boolean(
+    goal && navigation?.navigationState && !terminalNavStates.includes(navigation.navigationState),
+  )
   const isExploring = Boolean(exploration?.state === 'EXPLORING')
   const isPuppyMode = mode === 'puppy'
 
@@ -185,6 +188,15 @@ export function DriveHud({
             <div className="mt-1 text-[11px] font-semibold text-ink-100">
               {fixed(distance, 2)} <span className="text-[9px] text-ink-400 font-normal">m remaining</span>
             </div>
+
+            {typeof goal?.goalHeadingDeg === 'number' && (
+              <div className="mt-1 flex items-center justify-between gap-2 text-[9px] text-ink-400">
+                <span>Goal heading</span>
+                <span className="text-signal-300 font-mono">
+                  {Math.round(goal.goalHeadingDeg)}° ({getCompassHeading(goal.goalHeadingDeg)})
+                </span>
+              </div>
+            )}
 
             {isLive ? (
               // LIVE mode: show Nav2 state, no fake percentage

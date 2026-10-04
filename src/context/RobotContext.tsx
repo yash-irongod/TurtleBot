@@ -32,6 +32,7 @@ const EMPTY_NAVIGATION: NavigationInfo = {
   navigationState: 'IDLE',
   goal: null,
   path: [],
+  localPath: [],
   distanceRemainingM: 0,
   progressPct: 0,
 }

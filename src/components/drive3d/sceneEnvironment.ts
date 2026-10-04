@@ -252,91 +252,82 @@ function createDesignatedBoundaryManager(): DesignatedBoundaryManager {
       return
     }
 
-    // LIVE mode: classify the real OccupancyGrid using outside-connected unknown
-    // regions. Continuous occupied components that touch the mapped exterior become
-    // the arena boundary; compact interior components remain objects.
+    // LIVE mode: render map-derived boundary as clean, restrained polylines.
+    // No heavy wall meshes, no pylons, no crystals — just readable contour lines
+    // with a very subtle translucent vertical ribbon for depth perception.
     const geometry = extractMapGeometry(grid)
-    const segments = geometry.boundarySegments.map((segment) => ({
-      x1: segment.x1,
-      z1: segment.y1,
-      x2: segment.x2,
-      z2: segment.y2,
-      len: segment.lengthM,
-    }))
 
-    if (segments.length === 0) {
+    if (geometry.boundaryPolylines.length === 0 && geometry.boundarySegments.length === 0) {
       buildAwaitingBoundary()
       return
     }
 
-    // Build one unified 3D mesh for the classified boundary segments.
-    const positions: number[] = []
-    const uvs: number[] = []
-    const indices: number[] = []
-    const railPositions: number[] = []
-    const footPositions: number[] = []
-
-    let vertOffset = 0
-    segments.forEach((seg) => {
-      const { x1, z1, x2, z2, len } = seg
-      positions.push(
-        x1, 0, z1,
-        x2, 0, z2,
-        x2, shieldHeight, z2,
-        x1, shieldHeight, z1
-      )
-      const uMax = Math.max(1, len * 1.5)
-      uvs.push(0, 0, uMax, 0, uMax, 1, 0, 1)
-      indices.push(
-        vertOffset, vertOffset + 1, vertOffset + 2,
-        vertOffset, vertOffset + 2, vertOffset + 3,
-        vertOffset, vertOffset + 2, vertOffset + 1,
-        vertOffset, vertOffset + 3, vertOffset + 2
-      )
-      vertOffset += 4
-      railPositions.push(x1, shieldHeight, z1, x2, shieldHeight, z2)
-      footPositions.push(x1, 0.005, z1, x2, 0.005, z2)
+    // Thin primary contour line at ground level
+    const contourLineMat = new THREE.LineBasicMaterial({
+      color: 0x38bdf8,  // subtle sky blue
+      transparent: true,
+      opacity: 0.65,
     })
 
-    const wallGeo = new THREE.BufferGeometry()
-    wallGeo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
-    wallGeo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2))
-    wallGeo.setIndex(indices)
-    wallGeo.computeVertexNormals()
-    group.add(new THREE.Mesh(wallGeo, wallMaterial))
+    // Very subtle translucent ribbon
+    const ribbonHeight = 0.12  // restrained height
+    const ribbonMat = new THREE.MeshBasicMaterial({
+      color: 0x38bdf8,
+      transparent: true,
+      opacity: 0.08,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    })
 
-    const railGeo = new THREE.BufferGeometry()
-    railGeo.setAttribute('position', new THREE.Float32BufferAttribute(railPositions, 3))
-    group.add(new THREE.LineSegments(railGeo, topRailMat))
+    for (const poly of geometry.boundaryPolylines) {
+      if (poly.points.length < 2) continue
 
-    const footGeo = new THREE.BufferGeometry()
-    footGeo.setAttribute('position', new THREE.Float32BufferAttribute(footPositions, 3))
-    group.add(new THREE.LineSegments(footGeo, footingRailMat))
-
-    // Add corner pylons only where substantial boundary segments actually meet.
-    const longSegments = segments.filter((segment) => segment.len >= 0.45)
-    const corners: Array<[number, number]> = []
-    for (let i = 0; i < longSegments.length; i++) {
-      const first = longSegments[i]
-      for (let j = i + 1; j < longSegments.length; j++) {
-        const second = longSegments[j]
-        const firstEnds = [[first.x1, first.z1], [first.x2, first.z2]]
-        const secondEnds = [[second.x1, second.z1], [second.x2, second.z2]]
-        for (const [x1, z1] of firstEnds) {
-          for (const [x2, z2] of secondEnds) {
-            const dist = Math.hypot(x1 - x2, z1 - z2)
-            if (dist < grid.resolutionM * 1.5) {
-              const cx = (x1 + x2) * 0.5
-              const cz = (z1 + z2) * 0.5
-              if (!corners.some(([ex, ez]) => Math.hypot(cx - ex, cz - ez) < 1.0) && corners.length < 12) {
-                corners.push([cx, cz])
-              }
-            }
-          }
-        }
+      // Ground-level contour line
+      const linePts = poly.points.map(p => new THREE.Vector3(p.x, 0.01, p.y))
+      if (poly.closed && linePts.length >= 3) {
+        linePts.push(linePts[0].clone())
       }
+      const lineGeo = new THREE.BufferGeometry().setFromPoints(linePts)
+      group.add(new THREE.Line(lineGeo, contourLineMat))
+
+      // Subtle vertical ribbon along the contour
+      const pts = poly.points
+      const ribbonPositions: number[] = []
+      const ribbonIndices: number[] = []
+      let vi = 0
+      for (let i = 0; i < pts.length; i++) {
+        ribbonPositions.push(pts[i].x, 0, pts[i].y)          // bottom vertex
+        ribbonPositions.push(pts[i].x, ribbonHeight, pts[i].y) // top vertex
+        if (i > 0) {
+          // Two triangles forming a quad between consecutive edge pairs
+          const bl = vi - 2, br = vi, tl = vi - 1, tr = vi + 1
+          ribbonIndices.push(bl, br, tr, bl, tr, tl)
+          // Back face
+          ribbonIndices.push(bl, tr, br, bl, tl, tr)
+        }
+        vi += 2
+      }
+      if (poly.closed && pts.length >= 3) {
+        // Close the ribbon loop
+        const bl = vi - 2, br = 0, tl = vi - 1, tr = 1
+        ribbonIndices.push(bl, br, tr, bl, tr, tl)
+        ribbonIndices.push(bl, tr, br, bl, tl, tr)
+      }
+
+      const ribbonGeo = new THREE.BufferGeometry()
+      ribbonGeo.setAttribute('position', new THREE.Float32BufferAttribute(ribbonPositions, 3))
+      ribbonGeo.setIndex(ribbonIndices)
+      ribbonGeo.computeVertexNormals()
+      group.add(new THREE.Mesh(ribbonGeo, ribbonMat))
+
+      // Top rail line for subtle edge definition
+      const topPts = poly.points.map(p => new THREE.Vector3(p.x, ribbonHeight, p.y))
+      if (poly.closed && topPts.length >= 3) {
+        topPts.push(topPts[0].clone())
+      }
+      const topGeo = new THREE.BufferGeometry().setFromPoints(topPts)
+      group.add(new THREE.Line(topGeo, footingRailMat))
     }
-    corners.forEach(([cx, cz]) => group.add(createPylon(cx, cz)))
   }
 
   /**
@@ -392,9 +383,10 @@ export interface SceneEnvironment {
   routeRibbon: THREE.Object3D
   particles: THREE.Points
   lidarPointsCloud: THREE.Points
-  setGoalPosition: (pos: Position2D | null) => void
+  setGoalPosition: (pos: Position2D | null, headingDeg?: number) => void
   setFrontierTarget: (pos: Position2D | null) => void
   setRoutePath: (path: Position2D[]) => void
+  setLocalPath: (path: Position2D[]) => void
   updateMapGrid: (grid: OccupancyGrid, isLive?: boolean) => void
   updateLidarPoints: (points: LidarPoint[], robotPos: Position2D, headingDeg: number) => void
   update: (dtSec: number, robotPos: Position2D, linearVel: number, cameraPos?: THREE.Vector3) => void
@@ -1161,53 +1153,64 @@ function createRealTimeObstacleManager(loader: THREE.TextureLoader) {
       return
     }
 
-    // In LIVE mode: turn compact interior map components into semantic 3D obstacle props.
+    // In LIVE mode: render occupancy-derived obstacles as neutral extruded footprints.
+    // NO semantic object types (cones/drums/slabs/pipes) — the OccupancyGrid has
+    // no class information, only occupancy state.
     const geometry = extractMapGeometry(grid)
-    const newObstacleKeys = new Set<string>()
+    const newObstacleIds = new Set<string>()
+
+    // Shared neutral material for LIVE obstacles
+    const liveMat = new THREE.MeshStandardMaterial({
+      color: 0x4a6670,
+      transparent: true,
+      opacity: 0.55,
+      roughness: 0.7,
+      metalness: 0.15,
+      depthWrite: false,
+    })
 
     for (const obstacle of geometry.obstacles) {
-      const cx = obstacle.center.x
-      const cz = obstacle.center.y
-      const key = `${cx.toFixed(2)}_${cz.toFixed(2)}`
-      newObstacleKeys.add(key)
+      const id = obstacle.id
+      newObstacleIds.add(id)
 
-      if (!liveObstacleKeys.has(key)) {
-        liveObstacleKeys.add(key)
-        const hash = Math.abs(Math.round(cx * 10) * 19 + Math.round(cz * 10) * 7) % 5
-        let obj: THREE.Group
-        const obstacleSize = Math.max(obstacle.widthM, obstacle.heightM)
-        if (hash === 0) {
-          obj = createSafetyConeGroup(cx, cz, 0)
-        } else if (hash === 1) {
-          obj = createFallenDrum(cx, cz, 0, 0.22)
-        } else if (hash === 2) {
-          obj = createUprightDrum(cx, cz, 0.0)
-        } else if (hash === 3) {
-          obj = createSlabWithRebar(
-            cx,
-            cz,
-            Math.min(0.60, Math.max(0.32, obstacleSize)),
-            0.12,
-            Math.min(0.45, Math.max(0.24, obstacleSize * 0.8)),
-            0.35,
-          )
-        } else {
-          obj = createTiltedEmergingPipe(cx, cz, 0.12, 0.55, 0.48, -0.35)
-        }
-        obj.name = `live_obstacle_${key}`
-        rootGroup.add(obj)
+      if (!liveObstacleKeys.has(id)) {
+        liveObstacleKeys.add(id)
+
+        // Create a neutral extruded box matching the obstacle's actual footprint
+        const obW = Math.max(0.04, obstacle.widthM)
+        const obH = Math.max(0.04, obstacle.heightM)
+        const extrudeH = Math.min(0.2, Math.max(0.06, Math.sqrt(obW * obH) * 0.35))
+
+        const boxGeo = new THREE.BoxGeometry(obW, extrudeH, obH)
+        const mesh = new THREE.Mesh(boxGeo, liveMat)
+        mesh.position.set(obstacle.center.x, extrudeH * 0.5, obstacle.center.y)
+        mesh.name = `live_obstacle_${id}`
+        mesh.castShadow = false
+        mesh.receiveShadow = false
+
+        // Add a subtle wireframe outline for readability
+        const edgeGeo = new THREE.EdgesGeometry(boxGeo)
+        const edgeMat = new THREE.LineBasicMaterial({ color: 0x6fb8c9, transparent: true, opacity: 0.4 })
+        const wireframe = new THREE.LineSegments(edgeGeo, edgeMat)
+        mesh.add(wireframe)
+
+        rootGroup.add(mesh)
       }
     }
 
-    // Clean up obstacles that are no longer present in the updated map
+    // Remove obstacles whose stable IDs are no longer present
     for (const key of Array.from(liveObstacleKeys)) {
-      if (!newObstacleKeys.has(key)) {
+      if (!newObstacleIds.has(key)) {
         liveObstacleKeys.delete(key)
         const existing = rootGroup.getObjectByName(`live_obstacle_${key}`)
         if (existing) {
           rootGroup.remove(existing)
           existing.traverse((child) => {
             if (child instanceof THREE.Mesh) child.geometry?.dispose()
+            if (child instanceof THREE.LineSegments) {
+              child.geometry?.dispose()
+              if (child.material instanceof THREE.Material) child.material.dispose()
+            }
           })
         }
       }
@@ -1398,6 +1401,45 @@ export function createSceneEnvironment(grid: OccupancyGrid, isLive = false): Sce
   goalLight.position.set(0, 0.8, 0)
   goalBeacon.add(goalLight)
 
+  // Directional Goal Heading Arrow / Wedge (visualizes requested orientation)
+  const goalHeadingGroup = new THREE.Group()
+  goalHeadingGroup.name = 'Goal_Heading_Arrow'
+  goalHeadingGroup.visible = false
+
+  const arrowShape = new THREE.Shape()
+  arrowShape.moveTo(0, -0.42)      // Tip pointing along -Z (North in Three.js)
+  arrowShape.lineTo(0.14, -0.08)   // Right wing
+  arrowShape.lineTo(0.04, -0.14)   // Right inner notch
+  arrowShape.lineTo(0.04, 0.08)    // Right stem
+  arrowShape.lineTo(-0.04, 0.08)   // Left stem
+  arrowShape.lineTo(-0.04, -0.14)  // Left inner notch
+  arrowShape.lineTo(-0.14, -0.08)  // Left wing
+  arrowShape.closePath()
+
+  const arrowGeo = new THREE.ShapeGeometry(arrowShape)
+  arrowGeo.rotateX(-Math.PI / 2) // Lay flat on XZ plane
+  arrowGeo.translate(0, 0.02, 0)
+
+  const arrowMat = new THREE.MeshBasicMaterial({
+    color: 0x00f0ff,
+    transparent: true,
+    opacity: 0.85,
+    side: THREE.DoubleSide,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+  })
+  const arrowMesh = new THREE.Mesh(arrowGeo, arrowMat)
+  goalHeadingGroup.add(arrowMesh)
+
+  const arrowEdgeGeo = new THREE.EdgesGeometry(arrowGeo)
+  const arrowEdgeMat = new THREE.LineBasicMaterial({
+    color: 0xffffff,
+    transparent: true,
+    opacity: 0.85,
+  })
+  goalHeadingGroup.add(new THREE.LineSegments(arrowEdgeGeo, arrowEdgeMat))
+  goalBeacon.add(goalHeadingGroup)
+
   root.add(goalBeacon)
 
   // 5. Holographic Frontier Exploration Beacon (Cyber Cyan/Violet)
@@ -1436,13 +1478,21 @@ export function createSceneEnvironment(grid: OccupancyGrid, isLive = false): Sce
 
   root.add(frontierBeacon)
 
-  const setGoalPosition = (pos: Position2D | null) => {
+  const setGoalPosition = (pos: Position2D | null, headingDeg?: number) => {
     if (!pos) {
       goalBeacon.visible = false
+      goalHeadingGroup.visible = false
       return
     }
     goalBeacon.visible = true
     goalBeacon.position.set(pos.x, 0, pos.y)
+
+    if (typeof headingDeg === 'number' && Number.isFinite(headingDeg)) {
+      goalHeadingGroup.visible = true
+      goalHeadingGroup.rotation.y = -(headingDeg * Math.PI) / 180
+    } else {
+      goalHeadingGroup.visible = false
+    }
   }
 
   const setFrontierTarget = (pos: Position2D | null) => {
@@ -1454,54 +1504,73 @@ export function createSceneEnvironment(grid: OccupancyGrid, isLive = false): Sce
     frontierBeacon.visible = true
   }
 
-  // 6. Stepped Glowing Neon Navigation Path Pads
+  // 6. Exact Navigation Path Rendering
+  // RULE: the authoritative path must remain geometrically exact — no CatmullRom
+  // or other interpolation that would create a different path from what Nav2 planned.
   const routeGroup = new THREE.Group()
-  routeGroup.name = 'Stepped_Neon_Navigation_Path'
+  routeGroup.name = 'Exact_Navigation_Path'
   routeGroup.visible = false
   root.add(routeGroup)
 
-  const padGeo = new THREE.BoxGeometry(0.18, 0.008, 0.12)
+  const padGeo = new THREE.BoxGeometry(0.14, 0.006, 0.09)
   const padRimGeo = new THREE.EdgesGeometry(padGeo)
 
   const padCenterMat = new THREE.MeshBasicMaterial({
-    color: 0x00f0ff,
+    color: 0x00e8ff,
     transparent: true,
-    opacity: 0.88,
+    opacity: 0.75,
     blending: THREE.AdditiveBlending,
     depthWrite: false,
   })
 
   const padRimMat = new THREE.LineBasicMaterial({
-    color: 0xc084fc,
+    color: 0x9ca3af,
     transparent: true,
-    opacity: 0.95,
-    blending: THREE.AdditiveBlending,
+    opacity: 0.6,
   })
 
-  const pathLineMat = new THREE.LineBasicMaterial({
-    color: 0x38bdf8,
+  // Global path line: thin luminous cyan
+  const globalPathMat = new THREE.LineBasicMaterial({
+    color: 0x22d3ee,
     transparent: true,
-    opacity: 0.55,
-    blending: THREE.AdditiveBlending,
+    opacity: 0.7,
+    linewidth: 1,
+  })
+
+  // Local path line: brighter, slightly translucent
+  const localPathMat = new THREE.LineBasicMaterial({
+    color: 0x67e8f9,
+    transparent: true,
+    opacity: 0.85,
+    linewidth: 1,
   })
 
   let pathPads: THREE.Group[] = []
+  let localPathLine: THREE.Line | null = null
 
-  const setRoutePath = (path: Position2D[]) => {
+  // Track owned route resources explicitly for proper disposal
+  const routeOwnedResources: THREE.BufferGeometry[] = []
+
+  const clearRouteResources = () => {
     while (routeGroup.children.length > 0) {
       const child = routeGroup.children[0]
       routeGroup.remove(child)
-      if (child instanceof THREE.Line && child.geometry instanceof THREE.BufferGeometry) {
-        child.geometry.dispose()
-      }
     }
+    for (const geo of routeOwnedResources) geo.dispose()
+    routeOwnedResources.length = 0
     pathPads = []
+    localPathLine = null
+  }
+
+  const setRoutePath = (path: Position2D[]) => {
+    clearRouteResources()
 
     if (!path || path.length < 2) {
       routeGroup.visible = false
       return
     }
 
+    // Build exact polyline from Nav2 path points — no interpolation
     const pts: THREE.Vector3[] = []
     let totalLen = 0
 
@@ -1517,26 +1586,32 @@ export function createSceneEnvironment(grid: OccupancyGrid, isLive = false): Sce
       return
     }
 
-    const curve = new THREE.CatmullRomCurve3(pts, false, 'catmullrom', 0.25)
+    // Global path: exact polyline (the authoritative Nav2 route)
+    const lineGeo = new THREE.BufferGeometry().setFromPoints(pts)
+    routeOwnedResources.push(lineGeo)
+    const pathLine = new THREE.Line(lineGeo, globalPathMat)
+    routeGroup.add(pathLine)
+
+    // Waypoint markers at sampled path vertices
     const padSpacing = 0.32
     const numPads = Math.max(2, Math.floor(totalLen / padSpacing))
+    const step = Math.max(1, Math.floor(pts.length / numPads))
 
-    const curvePoints = curve.getPoints(Math.min(120, numPads * 6))
-    const lineGeo = new THREE.BufferGeometry().setFromPoints(curvePoints)
-    const pathConnectingLine = new THREE.Line(lineGeo, pathLineMat)
-    routeGroup.add(pathConnectingLine)
-
-    for (let i = 0; i <= numPads; i++) {
-      const u = i / numPads
-      const point = curve.getPoint(u)
-      const tangent = curve.getTangent(u).normalize()
+    for (let i = 0; i < pts.length; i += step) {
+      const point = pts[i]
+      // Compute tangent from neighboring points for orientation
+      const next = pts[Math.min(i + 1, pts.length - 1)]
+      const prev = pts[Math.max(i - 1, 0)]
+      const tx = next.x - prev.x
+      const tz = next.z - prev.z
 
       const pad = new THREE.Group()
-      pad.position.copy(point)
-      pad.position.y = 0.012
+      pad.position.set(point.x, 0.012, point.z)
 
-      const angleY = Math.atan2(tangent.x, tangent.z)
-      pad.rotation.y = angleY + Math.PI / 2
+      if (Math.abs(tx) > 0.001 || Math.abs(tz) > 0.001) {
+        const angleY = Math.atan2(tx, tz)
+        pad.rotation.y = angleY + Math.PI / 2
+      }
 
       const core = new THREE.Mesh(padGeo, padCenterMat)
       pad.add(core)
@@ -1549,6 +1624,23 @@ export function createSceneEnvironment(grid: OccupancyGrid, isLive = false): Sce
     }
 
     routeGroup.visible = true
+  }
+
+  /** Set the local controller path (shorter, near-robot). Rendered separately from global. */
+  const setLocalPath = (path: Position2D[]) => {
+    // Remove previous local path line
+    if (localPathLine) {
+      routeGroup.remove(localPathLine)
+      localPathLine = null
+    }
+
+    if (!path || path.length < 2) return
+
+    const pts = path.map(p => new THREE.Vector3(p.x, 0.018, p.y))
+    const geo = new THREE.BufferGeometry().setFromPoints(pts)
+    routeOwnedResources.push(geo)
+    localPathLine = new THREE.Line(geo, localPathMat)
+    routeGroup.add(localPathLine)
   }
 
   // 7. Clean LiDAR Handler: routes live obstacle detection to obstacleManager
@@ -1731,6 +1823,7 @@ export function createSceneEnvironment(grid: OccupancyGrid, isLive = false): Sce
     setGoalPosition,
     setFrontierTarget,
     setRoutePath,
+    setLocalPath,
     updateMapGrid,
     updateLidarPoints,
     update,

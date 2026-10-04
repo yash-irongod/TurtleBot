@@ -13,6 +13,7 @@ export interface DriveCameraManager {
     headingDeg: number,
     linearVel: number,
     angularVel: number,
+    goalPos?: Position2D | null,
   ) => void
   snapToRobot: (robotPos: Position2D, headingDeg: number) => void
   resize: (width: number, height: number) => void
@@ -52,6 +53,10 @@ export function createDriveCamera(aspect: number): DriveCameraManager {
   let prevLinearVel = 0
   let smoothedAccel = 0  // Exponentially smoothed acceleration (m/s²)
 
+  // Reusable per-frame vectors (hoisted to avoid allocation in update loop)
+  const _targetPos = new THREE.Vector3()
+  const _targetLookAt = new THREE.Vector3()
+
   const snapToRobot = (robotPos: Position2D, headingDeg: number) => {
     const headingRad = (headingDeg * Math.PI) / 180
     const forwardX = Math.sin(headingRad)
@@ -82,6 +87,7 @@ export function createDriveCamera(aspect: number): DriveCameraManager {
     headingDeg: number,
     linearVel: number,
     angularVel: number,
+    goalPos?: Position2D | null,
   ) => {
     const dt = Math.max(0.001, Math.min(0.1, dtSec))
     shakeTime += dt
@@ -91,7 +97,7 @@ export function createDriveCamera(aspect: number): DriveCameraManager {
     lastHeadingDeg = headingDeg
 
     const headingRad = (headingDeg * Math.PI) / 180
-    const speedFactor = Math.min(1, Math.max(0, linearVel / 0.22))
+    const speedFactor = Math.min(1, Math.max(0, Math.abs(linearVel) / 0.22))
 
     // ─── Acceleration / Braking load ────────────────────────────────────────
     // Compute raw acceleration from velocity delta, then low-pass filter it.
@@ -120,8 +126,8 @@ export function createDriveCamera(aspect: number): DriveCameraManager {
     const rightX = -camForwardZ  //  cos(cameraYawLag)
     const rightZ = camForwardX   //  sin(cameraYawLag)
 
-    const targetPos = new THREE.Vector3()
-    const targetLookAt = new THREE.Vector3()
+    const targetPos = _targetPos
+    const targetLookAt = _targetLookAt
     let targetFov = 56
     let targetRoll = 0
 
@@ -199,18 +205,32 @@ export function createDriveCamera(aspect: number): DriveCameraManager {
 
     } else {
       // ── Tactical Drone Camera ─────────────────────────────────────────────
-      targetPos.set(
-        robotPos.x,
-        2.6,
-        robotPos.y + 1.85,
-      )
-      targetLookAt.set(
-        robotPos.x,
-        0.05,
-        robotPos.y,
-      )
+      // Route-aware framing: if an active goal exists, frame both robot and goal.
+      // Otherwise, provide stable elevated tactical view centered over the robot.
+      if (goalPos && typeof goalPos.x === 'number' && typeof goalPos.y === 'number') {
+        const midX = (robotPos.x + goalPos.x) * 0.5
+        const midZ = (robotPos.y + goalPos.y) * 0.5
+        const dist = Math.hypot(robotPos.x - goalPos.x, robotPos.y - goalPos.y)
+        const tacticalHeight = Math.min(5.5, Math.max(2.4, 1.8 + dist * 0.55))
+        const tacticalOffsetZ = Math.min(4.0, Math.max(1.6, 1.2 + dist * 0.4))
+
+        targetPos.set(midX, tacticalHeight, midZ + tacticalOffsetZ)
+        targetLookAt.set(midX, 0.05, midZ)
+        targetFov = Math.min(64, Math.max(48, 48 + dist * 2.2))
+      } else {
+        targetPos.set(
+          robotPos.x,
+          2.6,
+          robotPos.y + 1.85,
+        )
+        targetLookAt.set(
+          robotPos.x,
+          0.05,
+          robotPos.y,
+        )
+        targetFov = 50
+      }
       targetRoll = 0
-      targetFov = 50
     }
 
     // ── High-Speed Harmonic Road Vibration (Micro-jitter) ──────────────────

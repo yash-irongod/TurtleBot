@@ -406,6 +406,7 @@ export function createRosRobotDataSource(options: RosRobotDataSourceOptions = {}
     navigationState: 'IDLE',
     goal: null,
     path: [],
+    localPath: [],
     distanceRemainingM: 0,
     progressPct: 0,
   }
@@ -483,6 +484,7 @@ export function createRosRobotDataSource(options: RosRobotDataSourceOptions = {}
       navigationState: 'IDLE',
       goal: null,
       path: [],
+      localPath: [],
       distanceRemainingM: 0,
       progressPct: 0,
     })
@@ -567,11 +569,12 @@ export function createRosRobotDataSource(options: RosRobotDataSourceOptions = {}
           if (!raw || typeof raw !== 'object') return
           const msgType = raw.type
 
+          // Only accept authoritative /map — optimized exploration maps use
+          // "optimized_map" type and are intentionally not consumed here.
           const isMapMsg =
             msgType === 'map' ||
             msgType === 'occupancy_grid' ||
-            raw.topic === '/map' ||
-            raw.topic === '/explore/optimized_map'
+            raw.topic === '/map'
           const rawMapData =
             raw.map ??
             raw.grid ??
@@ -604,15 +607,28 @@ export function createRosRobotDataSource(options: RosRobotDataSourceOptions = {}
             const nextPath = Array.isArray(nav.path)
               ? nav.path.map((point: any) => rosToFrontendPosition(point.x, point.y))
               : []
+            const frameId = typeof nav.frame_id === 'string' ? nav.frame_id : navInfo.globalPathFrame
             notifyNav({
               ...navInfo,
               path: nextPath,
+              globalPathFrame: frameId,
+              planRevision: (navInfo.planRevision ?? 0) + 1,
               detail: typeof nav.detail === 'string' ? nav.detail : navInfo.detail,
             })
             return
           }
 
           if (msgType === 'nav_local_plan') {
+            const nav = raw.navigation ?? raw
+            const nextLocalPath = Array.isArray(nav.local_path)
+              ? nav.local_path.map((point: any) => rosToFrontendPosition(point.x, point.y))
+              : []
+            const frameId = typeof nav.frame_id === 'string' ? nav.frame_id : navInfo.localPathFrame
+            notifyNav({
+              ...navInfo,
+              localPath: nextLocalPath,
+              localPathFrame: frameId,
+            })
             return
           }
 
@@ -624,10 +640,14 @@ export function createRosRobotDataSource(options: RosRobotDataSourceOptions = {}
             let nextGoal = navInfo.goal
             if (nav.goal && typeof nav.goal.x === 'number' && typeof nav.goal.y === 'number') {
               const gPos = rosToFrontendPosition(nav.goal.x, nav.goal.y)
+              const goalHeadingDeg = typeof nav.goal.yaw === 'number'
+                ? rosYawToFrontendHeadingDeg(nav.goal.yaw)
+                : undefined
               nextGoal = {
                 id: 'live-nav-target',
                 label: 'Nav2 Target',
                 position: gPos,
+                goalHeadingDeg,
                 status: nextState === 'GOAL_REACHED' ? 'reached' : 'active',
               }
             } else if (nextState === 'CANCELED' || nextState === 'FAILED' || nextState === 'IDLE') {
@@ -653,12 +673,20 @@ export function createRosRobotDataSource(options: RosRobotDataSourceOptions = {}
               ? nav.path.map((point: any) => rosToFrontendPosition(point.x, point.y))
               : navInfo.path
 
+            // Terminal states should clear the local plan
+            const terminalStates: NavigationState[] = ['IDLE', 'CANCELED', 'FAILED', 'GOAL_REACHED']
+            const nextLocalPath = terminalStates.includes(resolvedState) ? [] : navInfo.localPath
+
             notifyNav({
               navigationState: resolvedState,
               goal: nextGoal,
               path: nextPath,
+              localPath: nextLocalPath,
               distanceRemainingM,
               progressPct: nextState === 'GOAL_REACHED' ? 100 : 0,
+              globalPathFrame: navInfo.globalPathFrame,
+              localPathFrame: navInfo.localPathFrame,
+              planRevision: navInfo.planRevision,
               detail: typeof nav.detail === 'string' ? nav.detail : navInfo.detail,
               statusCode: typeof nav.status_code === 'number' ? nav.status_code : navInfo.statusCode,
             })
@@ -692,10 +720,14 @@ export function createRosRobotDataSource(options: RosRobotDataSourceOptions = {}
               let initialGoal: Waypoint | null = navInfo.goal
               if (nav.goal && typeof nav.goal.x === 'number' && typeof nav.goal.y === 'number') {
                 const gPos = rosToFrontendPosition(nav.goal.x, nav.goal.y)
+                const goalHeadingDeg = typeof nav.goal.yaw === 'number'
+                  ? rosYawToFrontendHeadingDeg(nav.goal.yaw)
+                  : undefined
                 initialGoal = {
                   id: 'live-nav-target',
                   label: 'Nav2 Target',
                   position: gPos,
+                  goalHeadingDeg,
                   status: nav.navigationState === 'GOAL_REACHED' ? 'reached' : 'active',
                 }
               }

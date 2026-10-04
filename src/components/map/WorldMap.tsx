@@ -123,7 +123,7 @@ export function WorldMap({ compact = false, variant = 'standard', className, onT
   const emptyLiveGrid = useMemo(() => createEmptyOccupancyGrid(), [])
   const grid = isLive && !liveOccupancyGrid ? emptyLiveGrid : (liveOccupancyGrid ?? demoOccupancyGrid)
   const mapGeometry = useMemo(
-    () => (isLive && liveOccupancyGrid ? extractMapGeometry(liveOccupancyGrid) : { boundarySegments: [], obstacles: [] }),
+    () => (isLive && liveOccupancyGrid ? extractMapGeometry(liveOccupancyGrid) : { boundaryPolylines: [], boundarySegments: [], obstacles: [] }),
     [isLive, liveOccupancyGrid],
   )
   const instanceId = useId().replace(/:/g, '')
@@ -459,32 +459,29 @@ export function WorldMap({ compact = false, variant = 'standard', className, onT
             cellRects
           )}
 
-          {isLive && mapGeometry.boundarySegments.length > 0 && (
+          {isLive && mapGeometry.boundaryPolylines && mapGeometry.boundaryPolylines.length > 0 && (
             <g pointerEvents="none" aria-label="Detected live map boundary">
-              {mapGeometry.boundarySegments.map((segment, index) => {
-                const p1 = worldToPx({ x: segment.x1, y: segment.y1 }, grid)
-                const p2 = worldToPx({ x: segment.x2, y: segment.y2 }, grid)
+              {mapGeometry.boundaryPolylines.map((poly, pIdx) => {
+                if (poly.points.length < 2) return null
+                const first = worldToPx(poly.points[0], grid)
+                const pathParts = [`M ${first.x.toFixed(1)} ${first.y.toFixed(1)}`]
+                for (let i = 1; i < poly.points.length; i++) {
+                  const pt = worldToPx(poly.points[i], grid)
+                  pathParts.push(`L ${pt.x.toFixed(1)} ${pt.y.toFixed(1)}`)
+                }
+                if (poly.closed) pathParts.push('Z')
+                const d = pathParts.join(' ')
+                const pKey = `bound-poly-${poly.points[0].x.toFixed(2)}_${poly.points[0].y.toFixed(2)}_${poly.points.length}_${pIdx}`
                 return (
-                  <g key={`boundary-${index}`}>
-                    <line
-                      x1={p1.x}
-                      y1={p1.y}
-                      x2={p2.x}
-                      y2={p2.y}
-                      className="stroke-critical-500/20"
-                      strokeWidth={5.5}
-                      strokeLinecap="round"
-                    />
-                    <line
-                      x1={p1.x}
-                      y1={p1.y}
-                      x2={p2.x}
-                      y2={p2.y}
-                      className="stroke-critical-400/90"
-                      strokeWidth={1.9}
-                      strokeLinecap="round"
-                    />
-                  </g>
+                  <path
+                    key={pKey}
+                    d={d}
+                    fill="none"
+                    className="stroke-sky-400/80"
+                    strokeWidth={1.8}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
                 )
               })}
             </g>
@@ -492,18 +489,18 @@ export function WorldMap({ compact = false, variant = 'standard', className, onT
 
           {isLive && mapGeometry.obstacles.length > 0 && (
             <g pointerEvents="none" aria-label="Detected live interior obstacles">
-              {mapGeometry.obstacles.map((obstacle, index) => {
+              {mapGeometry.obstacles.map((obstacle) => {
                 const topLeft = worldToPx(obstacle.min, grid)
                 const bottomRight = worldToPx(obstacle.max, grid)
                 return (
                   <rect
-                    key={`obstacle-${index}`}
+                    key={obstacle.id}
                     x={topLeft.x}
                     y={topLeft.y}
                     width={Math.max(2, bottomRight.x - topLeft.x)}
                     height={Math.max(2, bottomRight.y - topLeft.y)}
                     rx={2}
-                    className="fill-amber-400/[0.05] stroke-amber-400/55"
+                    className="fill-cyan-400/[0.08] stroke-cyan-400/50"
                     strokeWidth={1.2}
                     strokeDasharray="4 3"
                   />
@@ -590,6 +587,14 @@ export function WorldMap({ compact = false, variant = 'standard', className, onT
                 <line x1={0} y1={-4.5} x2={0} y2={-0.5} className="stroke-white" strokeWidth={1.4} strokeLinecap="round" />
                 <circle cx={0} cy={2.4} r={0.8} className="fill-white" />
               </g>
+
+              {/* Requested Goal Orientation Pointer */}
+              {typeof navigation.goal?.goalHeadingDeg === 'number' && (
+                <g transform={`translate(${goalPx.x} ${goalPx.y}) rotate(${navigation.goal.goalHeadingDeg})`} pointerEvents="none">
+                  <line x1={0} y1={-12} x2={0} y2={-26} className="stroke-cyan-400 drop-shadow-[0_0_4px_rgba(6,182,212,0.8)]" strokeWidth={2.2} strokeLinecap="round" />
+                  <polygon points="0,-32 5,-23 -5,-23" className="fill-cyan-400" />
+                </g>
+              )}
             </g>
           )}
 
