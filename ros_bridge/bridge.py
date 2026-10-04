@@ -101,6 +101,7 @@ WS_PORT = 8765
 MAPPING_NAV_LAUNCH_PATH = os.path.expanduser("~/turtlebot3_ws/launch/control_center_mapping_navigation.launch.py")
 EXPLORATION_LAUNCH_PATH = os.path.expanduser("~/turtlebot3_ws/launch/frontier_explorer_only.launch.py")
 ENV_SCRIPT_PATH = os.path.expanduser("~/turtlebot_env.sh")
+BRIDGE_LOG_DIR = os.path.expanduser("~/turtlebot3_ws/logs")
 MAP_FRAME = "map"
 BASE_FRAMES = ("base_link", "base_footprint")
 
@@ -452,6 +453,7 @@ class TurtleBotBridgeNode:
             "type": "nav_plan",
             "navigation": {
                 "path": path_points,
+                "frame_id": str(getattr(msg.header, "frame_id", "")),
             },
         }
         self.broadcast(payload)
@@ -466,6 +468,7 @@ class TurtleBotBridgeNode:
             "type": "nav_local_plan",
             "navigation": {
                 "local_path": path_points,
+                "frame_id": str(getattr(msg.header, "frame_id", "")),
             },
         }
         self.broadcast(payload)
@@ -1445,6 +1448,27 @@ class TurtleBotBridgeNode:
             record.termination_event.set()
             return True
 
+    def _open_subprocess_logs(self, prefix: str):
+        """Open timestamped log files for a subprocess.
+
+        Returns (stdout_file, stderr_file). Falls back to DEVNULL if the log
+        directory cannot be created. The caller does NOT need to close these
+        handles: the subprocess inherits the file descriptors and the kernel
+        reclaims them when the process exits.
+        """
+        try:
+            os.makedirs(BRIDGE_LOG_DIR, exist_ok=True)
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            stdout_path = os.path.join(BRIDGE_LOG_DIR, f"{prefix}_{timestamp}_stdout.log")
+            stderr_path = os.path.join(BRIDGE_LOG_DIR, f"{prefix}_{timestamp}_stderr.log")
+            stdout_file = open(stdout_path, "w")
+            stderr_file = open(stderr_path, "w")
+            self.logger.info(f"Subprocess logs: {stdout_path} / {stderr_path}")
+            return stdout_file, stderr_file
+        except Exception as exc:
+            self.logger.warn(f"Could not open subprocess logs ({prefix}): {exc}")
+            return subprocess.DEVNULL, subprocess.DEVNULL
+
     def _ensure_mapping_navigation_stack(self, timeout_sec: float = 25.0) -> bool:
         """Ensure Cartographer + Nav2 are running without starting a frontier explorer."""
         nav_client = getattr(self, "nav_client", None)
@@ -1468,11 +1492,12 @@ class TurtleBotBridgeNode:
 
         cmd = f"source {ENV_SCRIPT_PATH} && ros2 launch {MAPPING_NAV_LAUNCH_PATH}"
         try:
+            log_out, log_err = self._open_subprocess_logs("mapping_nav2")
             process = subprocess.Popen(
                 ["bash", "-c", cmd],
                 start_new_session=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=log_out,
+                stderr=log_err,
             )
             self.mapping_process = process
             self.mapping_process_started_by_bridge = True
@@ -1611,6 +1636,7 @@ class TurtleBotBridgeNode:
             cmd = f"source {ENV_SCRIPT_PATH} && ros2 launch {EXPLORATION_LAUNCH_PATH}"
             process = None
             try:
+                explore_log_out, explore_log_err = self._open_subprocess_logs("frontier_explorer")
                 # Keep launch admission and process-record installation in the same short
                 # motion lock. If disconnect/source-switch cleanup wins the lock first, no
                 # new autonomous process can be spawned after the bridge is disarmed.
@@ -1625,8 +1651,8 @@ class TurtleBotBridgeNode:
                     process = subprocess.Popen(
                         ["bash", "-c", cmd],
                         start_new_session=True,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
+                        stdout=explore_log_out,
+                        stderr=explore_log_err,
                     )
                     record = ExplorationProcessRecord(
                         generation=current_generation,

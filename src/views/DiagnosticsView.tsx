@@ -141,16 +141,16 @@ export function DiagnosticsView() {
           </button>
           <button
             type="button"
-            onClick={() => handlePreset('ws://192.168.0.112:8765')}
+            onClick={() => handlePreset('ws://192.168.0.106:8765')}
             className="rounded border border-white/[0.08] bg-white/[0.02] px-2 py-0.5 hover:border-signal-400/40 hover:bg-signal-900/30 hover:text-signal-200"
           >
-            Default VM (ws://192.168.0.112:8765)
+            LAN VM (ws://192.168.0.106:8765)
           </button>
         </div>
 
         <div className="mt-3 rounded border border-white/[0.06] bg-void-950/50 p-2.5 font-mono text-[10px] leading-relaxed text-ink-400">
           <span className="text-signal-400 font-semibold">Ubuntu Setup Note:</span> Start the Python bridge with{' '}
-          <code className="rounded bg-white/[0.06] px-1 py-0.5 text-ink-200">python3 ~/turtlebot_bridge/bridge.py</code>. If running
+          <code className="rounded bg-white/[0.06] px-1 py-0.5 text-ink-200">python3 ros_bridge/bridge.py</code> from the project root. If running
           this app in a remote browser over HTTPS, browsers block insecure WebSocket connections (<code className="text-amber-300">ws://</code>) due to mixed-content security. Run the app locally via{' '}
           <code className="rounded bg-white/[0.06] px-1 py-0.5 text-ink-200">npm run dev</code> on{' '}
           <code className="text-signal-300">http://localhost:3000</code> or use a secure tunnel (e.g. cloudflared, ngrok) to connect directly to your laptop!

@@ -28,7 +28,7 @@ import {
   type RosOccupancyGridPayload,
 } from '../lib/rosCoordinates'
 
-const DEFAULT_ROS_BRIDGE_URL = 'ws://192.168.0.112:8765'
+const DEFAULT_ROS_BRIDGE_URL = 'ws://localhost:8765'
 const RECONNECT_DELAY_MS = 3000
 const LIDAR_RANGE_MAX_DEFAULT = 3.5
 
@@ -364,7 +364,8 @@ export interface RosRobotDataSourceOptions {
 
 /**
  * Creates a real ROS 2 RobotDataSource that communicates directly with
- * bridge.py over WebSocket at ws://192.168.0.112:8765.
+ * bridge.py over WebSocket. The endpoint URL is configurable via query
+ * parameter, localStorage, env var, or the Diagnostics panel.
  *
  * Implements:
  * - Real /odom, /scan, /imu, /battery_state telemetry

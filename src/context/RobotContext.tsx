@@ -383,7 +383,7 @@ const setActiveMode = useCallback(
       setActiveModeState(mode)
       setActiveSectionState(mode)
     },
-    [exploration.state, navigation.navigationState, sourceStatus, stopMotion],
+    [exploration.state, motionOwner, navigation.navigationState, sourceStatus, stopMotion],
   )
 
 

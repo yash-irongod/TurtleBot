@@ -513,7 +513,7 @@ export function WorldMap({ compact = false, variant = 'standard', className, onT
           )}
 
           <line x1={viewW / 2} y1={0} x2={viewW / 2} y2={viewH} className="stroke-signal-400/[0.10]" strokeWidth={1} />
-          <line x1={0} y1={viewH / 2} x2={viewW} y2={viewH} className="stroke-signal-400/[0.10]" strokeWidth={1} />
+          <line x1={0} y1={viewH / 2} x2={viewW} y2={viewH / 2} className="stroke-signal-400/[0.10]" strokeWidth={1} />
           <text x={10} y={18} className="fill-ink-500 font-mono text-[9px] tracking-[0.16em]">
             MAP
           </text>
