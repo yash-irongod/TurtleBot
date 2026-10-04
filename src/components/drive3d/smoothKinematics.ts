@@ -171,8 +171,8 @@ export function createSmoothKinematics(initialOdom: OdometryState): SmoothKinema
     const accel = (linearVel - prevLinearVel) / dt
     prevLinearVel = linearVel
 
-    const targetPitch = Math.max(-0.04, Math.min(0.04, -accel * 0.025))
-    const targetRoll = Math.max(-0.025, Math.min(0.025, -angularVel * linearVel * 0.04))
+    const targetPitch = Math.max(-0.04, Math.min(0.04, accel * 0.025))
+    const targetRoll = Math.max(-0.025, Math.min(0.025, angularVel * linearVel * 0.04))
 
     const suspBlend = 1 - Math.exp(-8.0 * dt)
     pitchRad += (targetPitch - pitchRad) * suspBlend

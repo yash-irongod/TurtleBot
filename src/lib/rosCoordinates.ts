@@ -51,12 +51,13 @@ export function frontendToRosPosition(pos: Position2D): Position2D {
 /** Converts ROS yaw (radians CCW from East/+X) to Frontend compass heading (degrees CW from North). */
 export function rosYawToFrontendHeadingDeg(yawRad: number): number {
   const yawDeg = (yawRad * 180) / Math.PI
-  return normalizeDeg(90 - yawDeg)
+  // +180° offset aligns the physical driving face (2 motor wheels front) with frontend heading
+  return normalizeDeg(90 - yawDeg + 180)
 }
 
 /** Converts Frontend compass heading (degrees CW from North) to ROS yaw (radians CCW from East/+X). */
 export function frontendHeadingDegToRosYaw(headingDeg: number): number {
-  const deg = normalizeDeg(90 - headingDeg)
+  const deg = normalizeDeg(90 - (headingDeg - 180))
   // Bring into [-180, 180] for standard ROS quaternion / yaw representations
   const normalizedYawDeg = deg > 180 ? deg - 360 : deg
   return (normalizedYawDeg * Math.PI) / 180

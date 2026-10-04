@@ -355,12 +355,12 @@ export function createTurtleBot3Burger(): TurtleBot3Mesh {
   rightWheel.position.set(0.08, wheelRadius, 0)
   root.add(rightWheel)
 
-  // Rear Ball Caster Wheel
+  // Rear Ball Caster Wheel (authentic rear position trailing the drive wheels)
   const casterMount = new THREE.Mesh(
     new THREE.BoxGeometry(0.016, 0.018, 0.016),
     standoffMat,
   )
-  casterMount.position.set(0, 0.024, -0.052)
+  casterMount.position.set(0, 0.024, 0.052)
   casterMount.castShadow = true
   chassis.add(casterMount)
 
@@ -368,7 +368,7 @@ export function createTurtleBot3Burger(): TurtleBot3Mesh {
     new THREE.SphereGeometry(0.009, 20, 20),
     new THREE.MeshStandardMaterial({ color: 0x94a3b8, metalness: 0.95, roughness: 0.1 }),
   )
-  casterBall.position.set(0, 0.009, -0.052)
+  casterBall.position.set(0, 0.009, 0.052)
   casterBall.castShadow = true
   chassis.add(casterBall)
 
@@ -385,30 +385,31 @@ export function createTurtleBot3Burger(): TurtleBot3Mesh {
       new THREE.CylinderGeometry(0.006, 0.008, 0.012, 16),
       headlampHousingMat,
     )
-    housing.rotation.x = Math.PI / 2
-    housing.position.set(x, 0.074, 0.068)
+    housing.rotation.x = -Math.PI / 2
+    housing.position.set(x, 0.074, -0.068)
     chassis.add(housing)
 
     const bulb = new THREE.Mesh(new THREE.CircleGeometry(0.005, 16), headlampMat)
-    bulb.position.set(x, 0.074, 0.0745)
+    bulb.rotation.y = Math.PI
+    bulb.position.set(x, 0.074, -0.0745)
     chassis.add(bulb)
 
     const spot = new THREE.SpotLight(0xfff7ed, 2.4, 6.0, Math.PI / 5, 0.4, 1.4)
-    spot.position.set(x, 0.074, 0.075)
-    spot.target.position.set(x, 0, 1.8)
+    spot.position.set(x, 0.074, -0.075)
+    spot.target.position.set(x, 0, -1.8)
     chassis.add(spot)
     chassis.add(spot.target)
     headlights.push(spot)
   })
 
-  // Reactive Red Taillights
+  // Reactive Red Taillights (facing rear +Z)
   const taillights: THREE.Mesh[] = []
   ;[-0.038, 0.038].forEach((x) => {
     const tl = new THREE.Mesh(
       new THREE.BoxGeometry(0.014, 0.004, 0.003),
       tailLightOffMat,
     )
-    tl.position.set(x, 0.074, -0.07)
+    tl.position.set(x, 0.074, 0.07)
     chassis.add(tl)
     taillights.push(tl)
   })
