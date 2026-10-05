@@ -28,7 +28,7 @@ import {
   type RosOccupancyGridPayload,
 } from '../lib/rosCoordinates'
 
-const DEFAULT_ROS_BRIDGE_URL = 'ws://localhost:8765'
+const DEFAULT_ROS_BRIDGE_URL = 'ws://localhost:3000'
 const RECONNECT_DELAY_MS = 3000
 const LIDAR_RANGE_MAX_DEFAULT = 3.5
 
