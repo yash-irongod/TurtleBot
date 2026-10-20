@@ -1,5 +1,6 @@
 import clsx from 'clsx'
 import { useId } from 'react'
+import { Octagon, Pause, Play, RotateCcw } from 'lucide-react'
 import { useRobot } from '../../context/RobotContext'
 import { fixed } from '../../lib/format'
 import { GlassPanel } from '../common/GlassPanel'
@@ -99,7 +100,18 @@ function sourceNote(environment: DataEnvironment): string {
 }
 
 export function NavigationStatusPanel() {
-  const { navigation, environment, sourceStatus } = useRobot()
+  const {
+    navigation,
+    environment,
+    sourceStatus,
+    startNavigation,
+    pauseNavigation,
+    resumeNavigation,
+    cancelNavigation,
+    emergencyStopped,
+    autoNavigateOnClick,
+    setAutoNavigateOnClick,
+  } = useRobot()
   const { navigationState, goal, distanceRemainingM, progressPct, detail } = navigation
   const isLive = sourceStatus === 'LIVE'
   const panelTitleId = useId().replace(/:/g, '')
@@ -143,6 +155,7 @@ export function NavigationStatusPanel() {
         </div>
       </div>
 
+      {/* Target Info */}
       <div className="mt-4">
         <div className="flex items-baseline justify-between gap-3">
           <MicroLabel>Target</MicroLabel>
@@ -161,9 +174,112 @@ export function NavigationStatusPanel() {
           </div>
         ) : (
           <p className="mt-1 text-[11px] leading-relaxed text-ink-500">
-            Click a free cell on the {isLive ? 'live map' : 'demo map'} or select a{' '}
-            {isLive ? 'Nav2 goal' : 'demo waypoint'} to prepare a route.
+            Click anywhere on the map or drag the target marker to place a route goal.
           </p>
+        )}
+      </div>
+
+      {/* Auto-navigate Switch */}
+      <div className="mt-3 flex items-center justify-between rounded-lg border border-white/[0.07] bg-white/[0.02] px-3 py-2">
+        <div className="flex flex-col pr-2">
+          <span className="font-mono text-[11px] text-ink-200">Auto-navigate on click</span>
+          <span className="font-mono text-[9px] text-ink-500">Immediately start Nav2 when target is clicked</span>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={autoNavigateOnClick}
+          onClick={() => setAutoNavigateOnClick(!autoNavigateOnClick)}
+          className={clsx(
+            'relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none',
+            autoNavigateOnClick ? 'bg-signal-500' : 'bg-void-800 border-white/[0.12]',
+          )}
+        >
+          <span
+            className={clsx(
+              'pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out',
+              autoNavigateOnClick ? 'translate-x-4' : 'translate-x-0',
+            )}
+          />
+        </button>
+      </div>
+
+      {/* Navigation Action Buttons */}
+      <div className="mt-3 flex flex-col gap-2">
+        {navigationState === 'READY' && (
+          <button
+            type="button"
+            onClick={startNavigation}
+            disabled={emergencyStopped || !goal}
+            className="flex w-full items-center justify-center gap-2 rounded-lg border border-signal-400/50 bg-signal-900/50 px-3 py-2.5 font-mono text-[11px] font-semibold uppercase tracking-wider text-signal-300 shadow transition hover:bg-signal-900/80 active:scale-[0.98] disabled:opacity-50"
+          >
+            <Play className="h-4 w-4 fill-current" />
+            <span>Start Navigation</span>
+          </button>
+        )}
+
+        {(navigationState === 'PLANNING' || navigationState === 'NAVIGATING') && (
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={pauseNavigation}
+              className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-amber-400/40 bg-amber-500/[0.12] px-3 py-2 font-mono text-[11px] font-semibold uppercase tracking-wider text-amber-300 shadow transition hover:bg-amber-500/[0.22] active:scale-[0.98]"
+            >
+              <Pause className="h-3.5 w-3.5" />
+              <span>Pause</span>
+            </button>
+            <button
+              type="button"
+              onClick={cancelNavigation}
+              className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-critical-500/40 bg-critical-500/[0.12] px-3 py-2 font-mono text-[11px] font-semibold uppercase tracking-wider text-critical-300 shadow transition hover:bg-critical-500/[0.22] active:scale-[0.98]"
+            >
+              <Octagon className="h-3.5 w-3.5" />
+              <span>Cancel</span>
+            </button>
+          </div>
+        )}
+
+        {navigationState === 'PAUSED' && (
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={resumeNavigation}
+              className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-signal-400/40 bg-signal-900/40 px-3 py-2 font-mono text-[11px] font-semibold uppercase tracking-wider text-signal-300 shadow transition hover:bg-signal-900/70 active:scale-[0.98]"
+            >
+              <Play className="h-3.5 w-3.5 fill-current" />
+              <span>Resume</span>
+            </button>
+            <button
+              type="button"
+              onClick={cancelNavigation}
+              className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-critical-500/40 bg-critical-500/[0.12] px-3 py-2 font-mono text-[11px] font-semibold uppercase tracking-wider text-critical-300 shadow transition hover:bg-critical-500/[0.22] active:scale-[0.98]"
+            >
+              <Octagon className="h-3.5 w-3.5" />
+              <span>Cancel</span>
+            </button>
+          </div>
+        )}
+
+        {navigationState === 'CANCELING' && (
+          <button
+            type="button"
+            disabled
+            className="flex w-full items-center justify-center gap-2 rounded-lg border border-amber-400/30 bg-amber-500/[0.06] px-3 py-2 font-mono text-[11px] font-semibold uppercase tracking-wider text-amber-300 shadow disabled:opacity-70"
+          >
+            <Octagon className="h-3.5 w-3.5" />
+            <span>Canceling Route...</span>
+          </button>
+        )}
+
+        {(navigationState === 'GOAL_REACHED' || navigationState === 'FAILED' || navigationState === 'CANCELED' || navigationState === 'IDLE') && goal && (
+          <button
+            type="button"
+            onClick={cancelNavigation}
+            className="flex w-full items-center justify-center gap-2 rounded-lg border border-white/[0.09] bg-white/[0.03] px-3 py-1.5 font-mono text-[10px] uppercase tracking-wider text-ink-400 shadow transition hover:bg-white/[0.08] hover:text-ink-200"
+          >
+            <RotateCcw className="h-3 w-3" />
+            <span>Clear Target</span>
+          </button>
         )}
       </div>
 

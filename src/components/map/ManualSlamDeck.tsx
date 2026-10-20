@@ -1,6 +1,6 @@
 import clsx from 'clsx'
 import { useCallback, useEffect, useRef, useState, type PointerEvent } from 'react'
-import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Hand, Octagon } from 'lucide-react'
+import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Hand, Octagon, RotateCcw } from 'lucide-react'
 import { useRobot } from '../../context/RobotContext'
 import { GlassPanel } from '../common/GlassPanel'
 import { MicroLabel } from '../common/MicroLabel'
@@ -22,10 +22,16 @@ export function ManualSlamDeck() {
     emergencyStopped,
     setVelocityIntent,
     clearVelocityIntent,
-    stopMotion,
     exploration,
     stopExploration,
+    ensureMapping,
+    refreshMap,
+    mappingStatus,
   } = useRobot()
+
+  useEffect(() => {
+    ensureMapping()
+  }, [ensureMapping])
 
   const [speedPreset, setSpeedPreset] = useState<SpeedPreset>('medium')
   const [activeDirection, setActiveDirection] = useState<'forward' | 'backward' | 'left' | 'right' | null>(null)
@@ -40,8 +46,11 @@ export function ManualSlamDeck() {
     (cmd: VelocityCommand) => {
       currentCommandRef.current = cmd
       if (cmd.linear === 0 && cmd.angular === 0) {
+        // Only clear this component's own intent source. Previously this also
+        // called stopMotion() which wiped ALL intents (including keyboard),
+        // causing the global useKeyboardDrive to lose its state and the robot
+        // to stop unexpectedly when the d-pad was released.
         clearVelocityIntent('manual-pad')
-        stopMotion()
       } else {
         // If auto exploration was running, stop it so manual drive takes precedence
         if (isExploring) {
@@ -50,7 +59,7 @@ export function ManualSlamDeck() {
         setVelocityIntent('manual-pad', cmd)
       }
     },
-    [clearVelocityIntent, setVelocityIntent, stopMotion, isExploring, stopExploration],
+    [clearVelocityIntent, setVelocityIntent, isExploring, stopExploration],
   )
 
   const stopActiveCommand = useCallback(() => {
@@ -87,55 +96,12 @@ export function ManualSlamDeck() {
     [emergencyStopped, maxLinear, maxAngular, dispatchCommand],
   )
 
-  // Keyboard navigation listener (WASD and Arrow keys)
-  useEffect(() => {
-    const handleKeyDown = (e: globalThis.KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return
-      if (e.repeat) return
-
-      const key = e.key.toLowerCase()
-      if (key === 'w' || key === 'arrowup') {
-        e.preventDefault()
-        startCommand('forward')
-      } else if (key === 's' || key === 'arrowdown') {
-        e.preventDefault()
-        startCommand('backward')
-      } else if (key === 'a' || key === 'arrowleft') {
-        e.preventDefault()
-        startCommand('left')
-      } else if (key === 'd' || key === 'arrowright') {
-        e.preventDefault()
-        startCommand('right')
-      } else if (key === ' ') {
-        e.preventDefault()
-        stopActiveCommand()
-      }
-    }
-
-    const handleKeyUp = (e: globalThis.KeyboardEvent) => {
-      const key = e.key.toLowerCase()
-      if (
-        key === 'w' ||
-        key === 's' ||
-        key === 'a' ||
-        key === 'd' ||
-        key === 'arrowup' ||
-        key === 'arrowdown' ||
-        key === 'arrowleft' ||
-        key === 'arrowright'
-      ) {
-        stopActiveCommand()
-      }
-    }
-
-    window.addEventListener('keydown', handleKeyDown)
-    window.addEventListener('keyup', handleKeyUp)
-    return () => {
-      window.removeEventListener('keydown', handleKeyDown)
-      window.removeEventListener('keyup', handleKeyUp)
-      stopActiveCommand()
-    }
-  }, [startCommand, stopActiveCommand])
+  // NOTE: WASD / Arrow keyboard drive is handled globally by useKeyboardDrive in
+  // RobotContext (enabled for both MANUAL and AUTONOMOUS modes). Registering a
+  // second set of key listeners here caused both handlers to fire on the same
+  // keypress, leading to intent-source fighting (keyboard vs manual-pad) and
+  // unpredictable motion cancellation. The D-pad buttons below remain the
+  // touch/pointer input path; keyboard is handled centrally.
 
   const handlePointerDown = (dir: 'forward' | 'backward' | 'left' | 'right') => (e: PointerEvent) => {
     e.preventDefault()
@@ -288,6 +254,25 @@ export function ManualSlamDeck() {
           <span className="text-ink-500 uppercase tracking-wider block">Angular Velocity</span>
           <span className="text-ink-100 text-[12px]">{radiansPerSecond(telemetry.odometry.angularVelocity)}</span>
         </div>
+      </div>
+
+      {/* Map Reset / Refresh Control */}
+      <div className="mt-3 flex items-center justify-between border-t border-white/[0.06] pt-2.5">
+        <div className="flex items-center gap-1.5 font-mono text-[9px] text-ink-500">
+          <span className={clsx('h-1.5 w-1.5 rounded-full', mappingStatus === 'error' ? 'bg-critical-400' : mappingStatus === 'ready' || mappingStatus === 'streaming' ? 'bg-signal-400' : 'bg-amber-400 animate-ping')} />
+          <span className="uppercase">
+            {mappingStatus === 'starting' ? 'Starting SLAM...' : mappingStatus === 'streaming' ? 'Cartographer live' : mappingStatus === 'ready' ? 'Cartographer ready' : 'SLAM active'}
+          </span>
+        </div>
+        <button
+          type="button"
+          onClick={refreshMap}
+          className="flex items-center gap-1 rounded border border-white/[0.08] bg-white/[0.02] px-2 py-0.5 font-mono text-[9px] uppercase tracking-wider text-ink-300 transition hover:border-signal-400/40 hover:bg-signal-900/30 hover:text-signal-300"
+          title="Reset and refresh the SLAM map"
+        >
+          <RotateCcw className="h-3 w-3" />
+          <span>Reset Map</span>
+        </button>
       </div>
     </GlassPanel>
   )

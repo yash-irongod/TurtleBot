@@ -28,7 +28,7 @@ import {
   type RosOccupancyGridPayload,
 } from '../lib/rosCoordinates'
 
-const DEFAULT_ROS_BRIDGE_URL = 'ws://localhost:3000'
+const DEFAULT_ROS_BRIDGE_URL = 'ws://localhost:8765'
 const RECONNECT_DELAY_MS = 3000
 const LIDAR_RANGE_MAX_DEFAULT = 3.5
 
@@ -429,6 +429,13 @@ export function createRosRobotDataSource(options: RosRobotDataSourceOptions = {}
   const explorationListeners = new Set<(exploration: ExplorationInfo) => void>()
   const mapListeners = new Set<(map: OccupancyGrid | null) => void>()
 
+  let mappingStatus: 'idle' | 'starting' | 'ready' | 'streaming' | 'error' = 'idle'
+  const mappingStatusListeners = new Set<(status: 'idle' | 'starting' | 'ready' | 'streaming' | 'error') => void>()
+  const notifyMappingStatus = (s: 'idle' | 'starting' | 'ready' | 'streaming' | 'error') => {
+    mappingStatus = s
+    mappingStatusListeners.forEach((fn) => fn(s))
+  }
+
   let sourceSwitchRequestSequence = 0
   let pendingSourceSwitch: {
     target: 'LIVE' | 'DEMO'
@@ -581,9 +588,21 @@ export function createRosRobotDataSource(options: RosRobotDataSourceOptions = {}
             (raw.data && typeof raw.data === 'object' && raw.data.width ? raw.data : null) ??
             (raw.width && raw.data ? raw : null)
 
+          if (msgType === 'map_cleared' || (isMapMsg && raw.map === null)) {
+            notifyMap(null)
+            notifyMappingStatus('idle')
+            return
+          }
+
+          if (msgType === 'mapping_status' && typeof raw.status === 'string') {
+            notifyMappingStatus(raw.status as any)
+            return
+          }
+
           if (isMapMsg && rawMapData) {
             const grid = convertRosOccupancyGridToFrontend(rawMapData as RosOccupancyGridPayload)
             notifyMap(grid)
+            notifyMappingStatus('streaming')
             return
           }
 
@@ -872,8 +891,14 @@ export function createRosRobotDataSource(options: RosRobotDataSourceOptions = {}
 
       // Convert frontend target position to ROS map frame (x_ros = x_front, y_ros = -y_front)
       const rosPos = frontendToRosPosition(navInfo.goal.position)
-      // Convert frontend heading to ROS yaw
-      const rosYaw = frontendHeadingDegToRosYaw(telemetry.odometry.headingDeg)
+      // Use goal's heading if explicitly set; otherwise default to 0 (face East / +X)
+      // which is the standard "don't care about final orientation" convention.
+      // Previously this used the robot's CURRENT heading, which is wrong — the goal
+      // orientation should describe the desired pose AT the destination, not where
+      // the robot is currently facing.
+      const rosYaw = navInfo.goal.goalHeadingDeg !== undefined
+        ? frontendHeadingDegToRosYaw(navInfo.goal.goalHeadingDeg)
+        : 0.0
 
       notifyNav({
         ...navInfo,
@@ -1086,6 +1111,40 @@ export function createRosRobotDataSource(options: RosRobotDataSourceOptions = {}
       if (current) listener(current)
       return () => {
         mapListeners.delete(listener)
+      }
+    },
+    clearMap: () => {
+      liveMap = null
+      notifyMap(null)
+      notifyMappingStatus('idle')
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(JSON.stringify({ type: 'clear_map' }))
+        } catch (e) {}
+      }
+    },
+    refreshMap: () => {
+      liveMap = null
+      notifyMap(null)
+      notifyMappingStatus('starting')
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(JSON.stringify({ type: 'refresh_map' }))
+        } catch (e) {}
+      }
+    },
+    ensureMapping: () => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(JSON.stringify({ type: 'ensure_mapping' }))
+        } catch (e) {}
+      }
+    },
+    subscribeMappingStatus: (listener) => {
+      mappingStatusListeners.add(listener)
+      listener(mappingStatus)
+      return () => {
+        mappingStatusListeners.delete(listener)
       }
     },
     getBridgeUrl: () => currentUrl,

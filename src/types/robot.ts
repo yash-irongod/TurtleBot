@@ -303,6 +303,14 @@ export interface RobotDataSource {
    */
   getInitialMap?(): OccupancyGrid | null
   subscribeMap?(listener: (map: OccupancyGrid | null) => void): () => void
+  /** Clear cached map on ROS bridge and local frontend, requesting a fresh /map */
+  clearMap?(): void
+  /** Reset map caches and re-request fresh mapping stack execution */
+  refreshMap?(): void
+  /** Ensure mapping stack (Cartographer + Nav2) is running */
+  ensureMapping?(): void
+  /** Subscribe to mapping process status (idle, starting, ready, streaming, error) */
+  subscribeMappingStatus?(listener: (status: 'idle' | 'starting' | 'ready' | 'streaming' | 'error') => void): () => void
   /** Request permission from a LIVE bridge before switching to another data source. */
   requestSourceSwitch?(target: 'LIVE' | 'DEMO'): Promise<boolean>
   /** Optional bridge WebSocket endpoint URL management */

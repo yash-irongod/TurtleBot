@@ -120,12 +120,14 @@ interface RobotContextValue {
   /** True only when the active source can safely accept an interactive map goal. */
   canEditMapGoal: boolean
   setGoal: () => void
-  /** Place or move a goal in map coordinates. DEMO resets to READY; LIVE delegates to its source. */
-  setGoalAt: (position: Position2D) => void
+  /** Place or move a goal in map coordinates. DEMO resets to READY; LIVE delegates to its source. Optional autoStart begins navigation. */
+  setGoalAt: (position: Position2D, autoStart?: boolean) => void
   startNavigation: () => void
   pauseNavigation: () => void
   resumeNavigation: () => void
   cancelNavigation: () => void
+  autoNavigateOnClick: boolean
+  setAutoNavigateOnClick: (val: boolean) => void
 
   /** Real Frontier Exploration states and lifecycle controls */
   exploration: ExplorationInfo
@@ -134,6 +136,11 @@ interface RobotContextValue {
 
   /** Live SLAM /map occupancy grid (null if awaiting feed in LIVE mode or in DEMO mode) */
   liveOccupancyGrid: OccupancyGrid | null
+  isRetrievingMap: boolean
+  mappingStatus: 'idle' | 'starting' | 'ready' | 'streaming' | 'error'
+  clearMapData: () => void
+  refreshMap: () => void
+  ensureMapping: () => void
 
   bridgeUrl: string
   setBridgeUrl: (url: string) => void
@@ -255,10 +262,33 @@ export function RobotProvider({ children, dataSource = mockRobotDataSource }: Ro
     return () => unsubscribe?.()
   }, [dataSource])
 
+  const [mappingStatus, setMappingStatus] = useState<'idle' | 'starting' | 'ready' | 'streaming' | 'error'>('idle')
+  const [autoNavigateOnClick, setAutoNavigateOnClick] = useState(false)
+
   useEffect(() => {
     setLiveOccupancyGrid(dataSource.getInitialMap?.() ?? null)
     const unsubscribe = dataSource.subscribeMap?.(setLiveOccupancyGrid)
     return () => unsubscribe?.()
+  }, [dataSource])
+
+  useEffect(() => {
+    const unsubscribe = dataSource.subscribeMappingStatus?.(setMappingStatus)
+    return () => unsubscribe?.()
+  }, [dataSource])
+
+  const clearMapData = useCallback(() => {
+    setLiveOccupancyGrid(null)
+    dataSource.clearMap?.()
+  }, [dataSource])
+
+  const refreshMap = useCallback(() => {
+    setLiveOccupancyGrid(null)
+    setMappingStatus('starting')
+    dataSource.refreshMap?.()
+  }, [dataSource])
+
+  const ensureMapping = useCallback(() => {
+    dataSource.ensureMapping?.()
   }, [dataSource])
 
   useEffect(() => {
@@ -280,7 +310,9 @@ export function RobotProvider({ children, dataSource = mockRobotDataSource }: Ro
     if (emergencyStopped || sourceStatus === 'DISCONNECTED') return STOP_COMMAND
 
     const intents = intentRef.current
-    if (activeMode === 'MANUAL') return intents['manual-pad'] ?? intents.keyboard ?? STOP_COMMAND
+    if (intents['manual-pad'] || intents.keyboard) {
+      return intents['manual-pad'] ?? intents.keyboard ?? STOP_COMMAND
+    }
     if (sourceStatus === 'DEMO' && activeMode === 'AUTONOMOUS') return intents.autonomy ?? STOP_COMMAND
     return STOP_COMMAND
   }, [activeMode, emergencyStopped, sourceStatus])
@@ -301,7 +333,7 @@ export function RobotProvider({ children, dataSource = mockRobotDataSource }: Ro
       const permitted =
         !emergencyStopped &&
         sourceStatus !== 'DISCONNECTED' &&
-        ((manualIntent && activeMode === 'MANUAL') || (source === 'autonomy' && sourceStatus === 'DEMO' && activeMode === 'AUTONOMOUS'))
+        (manualIntent || (source === 'autonomy' && sourceStatus === 'DEMO' && activeMode === 'AUTONOMOUS'))
 
       if (!permitted) {
         intentRef.current[source] = null
@@ -392,7 +424,7 @@ const setActiveMode = useCallback(
     !emergencyStopped &&
     activeMode === 'AUTONOMOUS' &&
     sourceStatus !== 'DISCONNECTED' &&
-    (sourceStatus === 'DEMO' || (typeof dataSource.navigation?.setGoal === 'function' && !!liveOccupancyGrid))
+    (sourceStatus === 'DEMO' || typeof dataSource.navigation?.setGoal === 'function')
 
   const setGoal = useCallback(() => {
     if (emergencyStopped || activeMode !== 'AUTONOMOUS' || sourceStatus !== 'DEMO') return
@@ -402,16 +434,17 @@ const setActiveMode = useCallback(
     demoNavigation.setGoal()
   }, [activeMode, clearVelocityIntent, demoNavigation, emergencyStopped, sourceStatus])
 
-const setGoalAt = useCallback(
-    (position: Position2D) => {
+  const setGoalAt = useCallback(
+    (position: Position2D, autoStart = false) => {
       if (!canEditMapGoal || !Number.isFinite(position.x) || !Number.isFinite(position.y)) return
 
-      // Moving a target must synchronously inhibit a prior DEMO command. The
-      // hook then resets the demo route to READY, requiring an intentional
-      // new start; a LIVE source owns its corresponding transport behavior.
+      // Moving a target must synchronously inhibit a prior DEMO command.
       clearVelocityIntent('autonomy')
       if (sourceStatus === 'DEMO') {
         demoNavigation.setGoalAt(position)
+        if (autoStart || autoNavigateOnClick) {
+          demoNavigation.startNavigation()
+        }
         return
       }
 
@@ -430,8 +463,14 @@ const setGoalAt = useCallback(
         status: 'pending',
       }
       dataSource.navigation?.setGoal?.(goal)
+
+      if (autoStart || autoNavigateOnClick) {
+        window.setTimeout(() => {
+          dataSource.navigation?.startNavigation?.()
+        }, 60)
+      }
     },
-    [canEditMapGoal, clearVelocityIntent, dataSource, demoNavigation, sourceStatus, navigation.navigationState]
+    [canEditMapGoal, clearVelocityIntent, dataSource, demoNavigation, sourceStatus, navigation.navigationState, autoNavigateOnClick]
   )
 
   const startNavigation = useCallback(() => {
@@ -546,7 +585,7 @@ const setGoalAt = useCallback(
   }, [stopMotion])
 
   const { activeKeys } = useKeyboardDrive({
-    enabled: activeMode === 'MANUAL' && !emergencyStopped && sourceStatus !== 'DISCONNECTED',
+    enabled: (activeMode === 'MANUAL' || activeMode === 'AUTONOMOUS') && !emergencyStopped && sourceStatus !== 'DISCONNECTED',
     onCommand: (command) => setVelocityIntent('keyboard', command),
     onRelease: () => clearVelocityIntent('keyboard'),
   })
@@ -706,12 +745,19 @@ const setGoalAt = useCallback(
       pauseNavigation,
       resumeNavigation,
       cancelNavigation,
+      autoNavigateOnClick,
+      setAutoNavigateOnClick,
 
       exploration,
       startExploration,
       stopExploration,
 
       liveOccupancyGrid,
+      isRetrievingMap: sourceStatus === 'LIVE' && !liveOccupancyGrid,
+      mappingStatus,
+      clearMapData,
+      refreshMap,
+      ensureMapping,
       bridgeUrl,
       setBridgeUrl,
 
@@ -730,19 +776,24 @@ const setGoalAt = useCallback(
       activeKeys,
       activeMode,
       activeSection,
+      autoNavigateOnClick,
       canEditMapGoal,
       canSwitchDataSource,
       cancelNavigation,
+      clearMapData,
       clearVelocityIntent,
       emergencyStopped,
+      ensureMapping,
       environment,
       exploration,
       liveOccupancyGrid,
+      mappingStatus,
       motionOwner,
       navigation,
       pauseNavigation,
       pausePuppy,
       puppyDemo.puppy,
+      refreshMap,
       resetEmergencyStop,
       requestDataSourceSwitch,
       resumeNavigation,
@@ -750,6 +801,7 @@ const setGoalAt = useCallback(
       sessionStartedAt,
       setActiveMode,
       setActiveSection,
+      setAutoNavigateOnClick,
       setGoal,
       setGoalAt,
       setVelocityIntent,

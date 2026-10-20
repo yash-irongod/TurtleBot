@@ -1,5 +1,6 @@
 import clsx from 'clsx'
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type PointerEvent } from 'react'
+import { Radar, RotateCcw } from 'lucide-react'
 import { useRobot } from '../../context/RobotContext'
 import { demoOccupancyGrid } from '../../data/mapGrid'
 import { fixed } from '../../lib/format'
@@ -82,24 +83,142 @@ function cellStateAt(position: Position2D, grid: OccupancyGrid) {
   return grid.cells[row * grid.widthCells + col]
 }
 
-function isFreeGoalPosition(position: Position2D, grid: OccupancyGrid, clearanceM = 0.26) {
-  if (cellStateAt(position, grid) !== 'free') return false
+/** Searches concentric rings outward to find the closest free cell (within maxDistanceM). */
+function findNearestFreePosition(position: Position2D, grid: OccupancyGrid, maxDistanceM = 0.6): Position2D | null {
+  const centerCol = Math.floor((position.x - grid.origin.x) / grid.resolutionM)
+  const centerRow = Math.floor((position.y - grid.origin.y) / grid.resolutionM)
+  const maxRadiusCells = Math.ceil(maxDistanceM / grid.resolutionM)
 
-  const radiusCells = Math.max(1, Math.ceil(clearanceM / grid.resolutionM))
+  let closestPos: Position2D | null = null
+  let minDistance = Infinity
+
+  for (let r = 1; r <= maxRadiusCells; r++) {
+    for (let dr = -r; dr <= r; dr++) {
+      for (let dc = -r; dc <= r; dc++) {
+        if (Math.abs(dr) !== r && Math.abs(dc) !== r) continue
+        const c = centerCol + dc
+        const row = centerRow + dr
+        if (c < 0 || c >= grid.widthCells || row < 0 || row >= grid.heightCells) continue
+        const state = grid.cells[row * grid.widthCells + c]
+        if (state === 'free') {
+          const dist = Math.hypot(dc * grid.resolutionM, dr * grid.resolutionM)
+          if (dist < minDistance) {
+            minDistance = dist
+            closestPos = {
+              x: grid.origin.x + (c + 0.5) * grid.resolutionM,
+              y: grid.origin.y + (row + 0.5) * grid.resolutionM,
+            }
+          }
+        }
+      }
+    }
+    if (closestPos) return closestPos
+  }
+  return null
+}
+
+/**
+ * Like findNearestFreePosition but also verifies the candidate has no
+ * occupied neighbours within the Nav2 inflation safety radius. This
+ * prevents snapping to a cell that is technically "free" in the SLAM map
+ * but would be inside Nav2's costmap inscribed zone.
+ */
+function findNearestSafeFreePosition(position: Position2D, grid: OccupancyGrid, maxDistanceM = 0.8): Position2D | null {
+  const centerCol = Math.floor((position.x - grid.origin.x) / grid.resolutionM)
+  const centerRow = Math.floor((position.y - grid.origin.y) / grid.resolutionM)
+  const maxRadiusCells = Math.ceil(maxDistanceM / grid.resolutionM)
+
+  let closestPos: Position2D | null = null
+  let minDistance = Infinity
+
+  for (let r = 1; r <= maxRadiusCells; r++) {
+    for (let dr = -r; dr <= r; dr++) {
+      for (let dc = -r; dc <= r; dc++) {
+        if (Math.abs(dr) !== r && Math.abs(dc) !== r) continue
+        const c = centerCol + dc
+        const row = centerRow + dr
+        if (c < 0 || c >= grid.widthCells || row < 0 || row >= grid.heightCells) continue
+        const state = grid.cells[row * grid.widthCells + c]
+        if (state === 'free') {
+          const candidatePos = {
+            x: grid.origin.x + (c + 0.5) * grid.resolutionM,
+            y: grid.origin.y + (row + 0.5) * grid.resolutionM,
+          }
+          if (!isSafeFromObstacles(candidatePos, grid)) continue
+          const dist = Math.hypot(dc * grid.resolutionM, dr * grid.resolutionM)
+          if (dist < minDistance) {
+            minDistance = dist
+            closestPos = candidatePos
+          }
+        }
+      }
+    }
+    if (closestPos) return closestPos
+  }
+  // Fallback: if no safe cell was found, try without safety check
+  return findNearestFreePosition(position, grid, maxDistanceM)
+}
+
+/**
+ * TurtleBot3 Burger physical half-width (~0.105 m) plus a small margin.
+ * Nav2's costmap inflation layer marks cells within `inflation_radius` of
+ * any obstacle as inscribed or lethal cost. A goal placed inside this zone
+ * is rejected even though the raw SLAM occupancy grid marks the cell as
+ * "free". The safety buffer must be at least `robot_radius` (0.105 m) and
+ * ideally a bit more to account for map discretisation rounding.
+ */
+const NAV_GOAL_SAFETY_RADIUS_M = 0.16
+
+/**
+ * Returns true when *every* grid cell within `radiusM` of `position` is
+ * either free or unknown (not occupied). This prevents selecting a target
+ * that the raw map considers free but Nav2's inflation layer would reject.
+ */
+function isSafeFromObstacles(position: Position2D, grid: OccupancyGrid, radiusM = NAV_GOAL_SAFETY_RADIUS_M): boolean {
+  const radiusCells = Math.ceil(radiusM / grid.resolutionM)
   const centerCol = Math.floor((position.x - grid.origin.x) / grid.resolutionM)
   const centerRow = Math.floor((position.y - grid.origin.y) / grid.resolutionM)
 
   for (let dr = -radiusCells; dr <= radiusCells; dr++) {
     for (let dc = -radiusCells; dc <= radiusCells; dc++) {
-      if (Math.hypot(dc * grid.resolutionM, dr * grid.resolutionM) > clearanceM) continue
+      // Only check cells actually within the circular radius
+      if (Math.hypot(dc, dr) * grid.resolutionM > radiusM) continue
       const c = centerCol + dc
       const r = centerRow + dr
-      if (c < 0 || c >= grid.widthCells || r < 0 || r >= grid.heightCells) return false
-      if (grid.cells[r * grid.widthCells + c] !== 'free') return false
+      if (c < 0 || c >= grid.widthCells || r < 0 || r >= grid.heightCells) continue
+      if (grid.cells[r * grid.widthCells + c] === 'occupied') return false
     }
   }
-
   return true
+}
+
+/**
+ * Resolves a clicked/dragged position against the occupancy grid.
+ * Free cells must also pass a safety-radius check (no obstacle within the
+ * robot's inflation footprint); otherwise the position is snapped to the
+ * nearest truly safe free cell. Occupied cells always snap outward. Unknown
+ * cells are accepted as-is (the robot may still be exploring there).
+ */
+function resolveTargetPosition(position: Position2D, grid: OccupancyGrid): { position: Position2D; snapped: boolean } | null {
+  const state = cellStateAt(position, grid)
+  if (state === null) {
+    return { position, snapped: false }
+  }
+  // Unknown cells are accepted directly — the user may be targeting an
+  // area not yet mapped. Nav2 will handle replanning if needed.
+  if (state === 'unknown') {
+    return { position, snapped: false }
+  }
+  // Free cells that are far enough from any obstacle are accepted directly.
+  if (state === 'free' && isSafeFromObstacles(position, grid)) {
+    return { position, snapped: false }
+  }
+  // Either occupied or too close to an obstacle — snap to nearest safe free cell.
+  const snapped = findNearestSafeFreePosition(position, grid)
+  if (snapped) {
+    return { position: snapped, snapped: true }
+  }
+  return null
 }
 
 /**
@@ -117,7 +236,20 @@ export interface WorldMapProps {
 export function WorldMap({ compact = false, variant = 'standard', className, onToggleMaximize }: WorldMapProps) {
   const isMinimap = variant === 'minimap'
   const isCompact = compact || isMinimap
-  const { telemetry, navigation, environment, canEditMapGoal, setGoalAt, sourceStatus, liveOccupancyGrid, exploration } = useRobot()
+  const {
+    telemetry,
+    navigation,
+    environment,
+    canEditMapGoal,
+    setGoalAt,
+    startNavigation,
+    sourceStatus,
+    liveOccupancyGrid,
+    exploration,
+    refreshMap,
+    mappingStatus,
+    autoNavigateOnClick,
+  } = useRobot()
   const isLive = sourceStatus === 'LIVE'
   const isAwaitingLiveMap = isLive && !liveOccupancyGrid
   const emptyLiveGrid = useMemo(() => createEmptyOccupancyGrid(), [])
@@ -184,19 +316,26 @@ export function WorldMap({ compact = false, variant = 'standard', className, onT
     (event: MouseEvent<SVGSVGElement>) => {
       if (!canEditMapGoal) return
       const position = mapPositionFromClient(event.clientX, event.clientY)
-      if (!position || !isFreeGoalPosition(position, grid)) {
+      if (!position) return
+
+      const resolved = resolveTargetPosition(position, grid)
+      if (!resolved) {
         showInvalidGoalNotice()
         return
       }
 
       setGoalEditNotice(
-        isLive
-          ? 'Live target updated — press Start to run the new route.'
-          : 'Demo target updated — press Start to run the new route.',
+        resolved.snapped
+          ? 'Target adjusted to open space.'
+          : autoNavigateOnClick
+            ? 'Target assigned — starting navigation route.'
+            : isLive
+              ? 'Live target set — press Start to run route.'
+              : 'Demo target set — press Start to run route.',
       )
-      setGoalAt(position)
+      setGoalAt(resolved.position, autoNavigateOnClick)
     },
-    [canEditMapGoal, grid, mapPositionFromClient, setGoalAt, showInvalidGoalNotice, isLive],
+    [canEditMapGoal, grid, mapPositionFromClient, setGoalAt, showInvalidGoalNotice, isLive, autoNavigateOnClick],
   )
 
   const handleGoalPointerDown = useCallback(
@@ -218,21 +357,27 @@ export function WorldMap({ compact = false, variant = 'standard', className, onT
     (event: PointerEvent<SVGGElement>) => {
       if (dragPointerIdRef.current !== event.pointerId) return
       const position = mapPositionFromClient(event.clientX, event.clientY)
-      if (!position || !isFreeGoalPosition(position, grid)) {
-        showInvalidGoalNotice()
-        return
-      }
-      setGoalEditNotice(null)
+      if (!position) return
       queueGoalPreview(position)
+      const state = cellStateAt(position, grid)
+      if (state === 'occupied') {
+        setGoalEditNotice('Target on obstacle · will snap to nearest open space on release')
+      } else {
+        setGoalEditNotice(null)
+      }
     },
-    [grid, mapPositionFromClient, queueGoalPreview, showInvalidGoalNotice],
+    [grid, mapPositionFromClient, queueGoalPreview],
   )
 
   const finishGoalDrag = useCallback(
     (event: PointerEvent<SVGGElement>, commit: boolean) => {
       if (dragPointerIdRef.current !== event.pointerId) return
 
-      if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId)
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        try {
+          event.currentTarget.releasePointerCapture(event.pointerId)
+        } catch {}
+      }
       dragPointerIdRef.current = null
       if (previewFrameRef.current !== null) {
         cancelAnimationFrame(previewFrameRef.current)
@@ -240,22 +385,32 @@ export function WorldMap({ compact = false, variant = 'standard', className, onT
       }
 
       const pointerPosition = mapPositionFromClient(event.clientX, event.clientY)
-      const finalPosition =
-        pointerPosition && isFreeGoalPosition(pointerPosition, grid) ? pointerPosition : draftGoalRef.current
+      const rawPos = pointerPosition ?? draftGoalRef.current
 
       draftGoalRef.current = null
       setDraftGoal(null)
       setDraggingGoal(false)
 
-      if (!commit || !finalPosition) return
+      if (!commit || !rawPos) return
+
+      const resolved = resolveTargetPosition(rawPos, grid)
+      if (!resolved) {
+        setGoalEditNotice('Target position is unreachable.')
+        return
+      }
+
       setGoalEditNotice(
-        isLive
-          ? 'Live target repositioned — press Start to run the new route.'
-          : 'Demo target repositioned — press Start to run the new route.',
+        resolved.snapped
+          ? 'Target adjusted to nearest open space.'
+          : autoNavigateOnClick
+            ? 'Target assigned — starting navigation route.'
+            : isLive
+              ? 'Live target repositioned — press Start to run route.'
+              : 'Demo target repositioned — press Start to run route.',
       )
-      setGoalAt(finalPosition)
+      setGoalAt(resolved.position, autoNavigateOnClick)
     },
-    [grid, mapPositionFromClient, setGoalAt, isLive],
+    [grid, mapPositionFromClient, setGoalAt, isLive, autoNavigateOnClick],
   )
 
   const handleGoalKeyDown = useCallback(
@@ -282,16 +437,19 @@ export function WorldMap({ compact = false, variant = 'standard', className, onT
       }
 
       event.preventDefault()
-      if (!isFreeGoalPosition(nextPosition, grid)) {
+      const resolved = resolveTargetPosition(nextPosition, grid)
+      if (!resolved) {
         showInvalidGoalNotice()
         return
       }
       setGoalEditNotice(
-        isLive
-          ? 'Live target repositioned — press Start to run the new route.'
-          : 'Demo target repositioned — press Start to run the new route.',
+        resolved.snapped
+          ? 'Target adjusted to open space.'
+          : isLive
+            ? 'Live target repositioned — press Start to run route.'
+            : 'Demo target repositioned — press Start to run route.',
       )
-      setGoalAt(nextPosition)
+      setGoalAt(resolved.position)
     },
     [canEditMapGoal, displayedGoalPosition, grid, setGoalAt, showInvalidGoalNotice, isLive],
   )
@@ -396,11 +554,27 @@ export function WorldMap({ compact = false, variant = 'standard', className, onT
               {isMinimap ? 'Drag Goal' : 'Click map · drag goal'}
             </span>
           )}
-          {!isMinimap && (
+          {isLive && (
+            <button
+              type="button"
+              onClick={refreshMap}
+              className="flex items-center gap-1 rounded-md border border-white/[0.09] bg-white/[0.03] px-2 py-0.5 font-mono text-[9px] uppercase tracking-wider text-ink-300 transition hover:border-signal-400/40 hover:bg-signal-900/30 hover:text-signal-300"
+              title="Clear old map data and request fresh ROS map"
+            >
+              <RotateCcw className="h-3 w-3" />
+              <span className="hidden sm:inline">Refresh Map</span>
+            </button>
+          )}
+          {isAwaitingLiveMap ? (
+            <span className="flex items-center gap-1.5 rounded-full border border-amber-400/35 bg-amber-500/[0.08] px-2 py-0.5 font-mono text-[9px] uppercase tracking-[0.1em] text-amber-300">
+              <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-ping" />
+              <span>RETRIEVING MAP...</span>
+            </span>
+          ) : !isMinimap ? (
             <span className={clsx('rounded-full border px-2 py-1 font-mono text-[9px] uppercase tracking-[0.1em]', source.className)}>
               {compact ? source.compactLabel : source.label}
             </span>
-          )}
+          ) : null}
           {isMinimap && onToggleMaximize && (
             <button
               type="button"
@@ -416,6 +590,34 @@ export function WorldMap({ compact = false, variant = 'standard', className, onT
       </div>
 
       <div className={clsx('relative flex min-h-0 flex-1 items-center justify-center', isMinimap ? 'p-1 pb-2' : compact ? 'p-2' : 'px-4 pb-4 pt-3')}>
+        {isAwaitingLiveMap && (
+          <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-void-950/85 p-6 backdrop-blur-sm text-center">
+            <div className="relative mb-3 flex h-16 w-16 items-center justify-center">
+              <div className="absolute inset-0 rounded-full border-2 border-signal-400/30 animate-ping opacity-40" />
+              <div className="absolute inset-2 rounded-full border border-signal-400/50 animate-pulse" />
+              <div className="absolute inset-4 rounded-full border border-cyan-400/60" />
+              <Radar className="h-6 w-6 text-signal-400 animate-spin" style={{ animationDuration: '3s' }} />
+            </div>
+
+            <div className="font-mono text-sm font-semibold uppercase tracking-[0.14em] text-signal-300">
+              Retrieving Live ROS Map
+            </div>
+            <p className="mt-1 max-w-xs font-mono text-[11px] leading-relaxed text-ink-400">
+              {mappingStatus === 'starting'
+                ? 'Initializing Cartographer SLAM stack... (~5-10s)'
+                : 'Listening on /map topic · waiting for Cartographer submaps...'}
+            </p>
+
+            <button
+              type="button"
+              onClick={refreshMap}
+              className="mt-3 flex items-center gap-1.5 rounded-md border border-signal-400/40 bg-signal-900/40 px-3 py-1 font-mono text-[10px] uppercase tracking-wider text-signal-300 shadow transition hover:bg-signal-900/70"
+            >
+              <RotateCcw className="h-3 w-3" />
+              <span>Refresh Map Feed</span>
+            </button>
+          </div>
+        )}
         <svg
           ref={svgRef}
           viewBox={`0 0 ${viewW} ${viewH}`}
@@ -593,6 +795,24 @@ export function WorldMap({ compact = false, variant = 'standard', className, onT
                 <g transform={`translate(${goalPx.x} ${goalPx.y}) rotate(${navigation.goal.goalHeadingDeg})`} pointerEvents="none">
                   <line x1={0} y1={-12} x2={0} y2={-26} className="stroke-cyan-400 drop-shadow-[0_0_4px_rgba(6,182,212,0.8)]" strokeWidth={2.2} strokeLinecap="round" />
                   <polygon points="0,-32 5,-23 -5,-23" className="fill-cyan-400" />
+                </g>
+              )}
+
+              {/* Floating Quick Action Button right on the map above target */}
+              {canEditMapGoal && navigation.navigationState === 'READY' && (
+                <g
+                  transform={`translate(${goalPx.x} ${goalPx.y - 38})`}
+                  className="cursor-pointer"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    startNavigation()
+                  }}
+                >
+                  <rect x={-42} y={-11} width={84} height={22} rx={11} className="fill-void-950/95 stroke-signal-400 drop-shadow-[0_0_10px_rgba(20,184,166,0.7)]" strokeWidth={1.5} />
+                  <polygon points="-26,-4 -26,4 -18,0" className="fill-signal-300" />
+                  <text x={6} y={3.5} textAnchor="middle" className="fill-signal-300 font-mono text-[9px] font-bold uppercase tracking-wider">
+                    START NAV
+                  </text>
                 </g>
               )}
             </g>

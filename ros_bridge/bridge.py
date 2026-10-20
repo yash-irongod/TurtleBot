@@ -319,7 +319,7 @@ class TurtleBotBridgeNode:
         self._explore_generation = 0
         self._explore_monitor_active = False
         # Exploration lifecycle serialization lock (threading).
-        self._explore_lock = threading.Lock()
+        self._explore_lock = threading.RLock()  # Must be reentrant: clear_map_data uses getattr fallback
 
         # Cleanup session generation: increments on each last-client disconnect.
         # Reconnects before cleanup completes will not re-arm the system.
@@ -589,7 +589,7 @@ class TurtleBotBridgeNode:
 
     def _broadcast_map_payload(self, payload: Dict[str, Any]):
         now = time.time()
-        if now - self.last_map_broadcast < 1.0:  # ~1 Hz throttled broadcast
+        if now - self.last_map_broadcast < 0.5:  # ~2 Hz real-time broadcast
             return
         self.last_map_broadcast = now
         self.broadcast(payload)
@@ -601,6 +601,52 @@ class TurtleBotBridgeNode:
         # silently replace the provenance of this reconnect payload.
         self._latest_map_payload = payload
         self._broadcast_map_payload(payload)
+
+    def clear_map_data(self):
+        """Clears cached map, navigation plans, and exploration data, and notifies clients."""
+        with getattr(self, "_explore_lock", threading.RLock()):
+            self._latest_map_payload = None
+            self._latest_optimized_map_payload = None
+            self.selected_frontier = None
+            self.frontier_count = 0
+            self.last_map_broadcast = 0.0
+            self._last_opt_map_broadcast = 0.0
+            self.latest_global_plan = []
+            self.latest_local_plan = []
+        self.broadcast({"type": "map_cleared"})
+        self.broadcast({
+            "type": "exploration",
+            "state": getattr(self, "exploration_state", "IDLE"),
+            "frontier_count": 0,
+            "selected_frontier": None,
+        })
+        # Key must match frontend expectation: navigation.path (not "poses")
+        self.broadcast({"type": "nav_plan", "navigation": {"path": []}})
+        # Key must match frontend expectation: navigation.local_path (not "poses")
+        self.broadcast({"type": "nav_local_plan", "navigation": {"local_path": []}})
+        if hasattr(self, "logger"):
+            self.logger.info("Cleared cached map and exploration telemetry.")
+
+    def refresh_map_data(self):
+        """Reset map caches and trigger fresh mapping retrieval."""
+        self.clear_map_data()
+        self.ensure_mapping_stack_async()
+
+    def ensure_mapping_stack_async(self):
+        """Asynchronously ensure Cartographer + Nav2 are running without blocking."""
+        def _worker():
+            try:
+                self.broadcast({"type": "mapping_status", "status": "starting"})
+                success = self._ensure_mapping_navigation_stack(timeout_sec=25.0)
+                if success:
+                    self.broadcast({"type": "mapping_status", "status": "ready"})
+                else:
+                    self.broadcast({"type": "mapping_status", "status": "error"})
+            except Exception as exc:
+                if hasattr(self, "logger"):
+                    self.logger.warn(f"ensure_mapping_stack_async exception: {exc}")
+                self.broadcast({"type": "mapping_status", "status": "error"})
+        threading.Thread(target=_worker, daemon=True, name="ensure_mapping_stack").start()
 
     def _on_optimized_map(self, msg: OccupancyGrid):
         # Optimized exploration maps are NOT authoritative. They use a distinct message
@@ -1488,6 +1534,26 @@ class TurtleBotBridgeNode:
                 return True
         except Exception:
             pass
+
+        # Before spawning a new subprocess, check if Cartographer/Nav2 nodes
+        # already exist in the ROS graph. The action server may take 8-15s to
+        # initialize, during which wait_for_server returns False even though the
+        # stack is already launching. Spawning a second instance causes dual
+        # /map publishers (double boundary) and conflicting TF transforms.
+        try:
+            known_mapping_nodes = {
+                'cartographer_node', 'cartographer_occupancy_grid_node',
+                'controller_server', 'bt_navigator', 'planner_server',
+            }
+            active_names = {n[0].lstrip('/') for n in self.node.get_node_names_and_namespaces()}
+            if known_mapping_nodes.intersection(active_names):
+                self.logger.info(
+                    f"Mapping/Nav2 nodes already in ROS graph ({known_mapping_nodes.intersection(active_names)}); "
+                    f"waiting for action server instead of launching a new stack"
+                )
+                return nav_client.wait_for_server(timeout_sec=min(timeout_sec, 20.0))
+        except Exception as exc:
+            self.logger.warn(f"ROS graph check failed (non-fatal): {exc}")
 
         if not os.path.exists(MAPPING_NAV_LAUNCH_PATH):
             self.logger.error(f"Mapping/Nav2 launch file not found: {MAPPING_NAV_LAUNCH_PATH}")
@@ -2515,6 +2581,9 @@ class WebSocketBridgeServer:
                     init_payload["map"] = self.bridge_node._latest_map_payload["map"]
                 await websocket.send(json.dumps(init_payload))
 
+                # Proactively ensure Cartographer + Nav2 stack is running for real-time map retrieval across modes
+                self.bridge_node.ensure_mapping_stack_async()
+
             async for raw_message in websocket:
                 if not self._is_current_operator(websocket, session_generation):
                     break
@@ -2600,6 +2669,15 @@ class WebSocketBridgeServer:
         elif msg_type == "explore_stop":
             self.bridge_node.stop_exploration()
 
+        elif msg_type == "clear_map":
+            self.bridge_node.clear_map_data()
+
+        elif msg_type == "refresh_map":
+            self.bridge_node.refresh_map_data()
+
+        elif msg_type in ("ensure_mapping", "start_mapping"):
+            self.bridge_node.ensure_mapping_stack_async()
+
         elif msg_type == "source_switch":
             requested_source = data.get("source", "").upper()
             request_id = data.get("request_id")
@@ -2655,7 +2733,10 @@ def main():
     print(f"[INFO] Starting WebSocket server on {WS_HOST}:{WS_PORT}...")
 
     async def start_websocket_server():
-        return await websockets.serve(server.handler, WS_HOST, WS_PORT)
+        # Raise the default 1 MiB frame limit. Large OccupancyGrid maps (500x500+)
+        # serialized as JSON integer arrays routinely exceed 1 MiB, causing the
+        # connection to drop with PayloadTooBig or code 1009.
+        return await websockets.serve(server.handler, WS_HOST, WS_PORT, max_size=10 * 1024 * 1024)
 
     start_server = loop.run_until_complete(start_websocket_server())
     print(f"[INFO] TurtleBot 3 Bridge is LIVE at ws://{WS_HOST}:{WS_PORT}")

@@ -1,6 +1,6 @@
 import clsx from 'clsx'
 import { BatteryCharging, Hand, Map, OctagonAlert, ShieldCheck, Square } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useRobot } from '../context/RobotContext'
 import { GlassPanel } from '../components/common/GlassPanel'
 import { EnvironmentTag } from '../components/common/EnvironmentTag'
@@ -113,12 +113,16 @@ function Cockpit() {
 }
 
 function ManualMappingWorkspace() {
-  const { sourceStatus, liveOccupancyGrid, telemetry } = useRobot()
+  const { sourceStatus, liveOccupancyGrid, telemetry, ensureMapping, refreshMap } = useRobot()
   const isLive = sourceStatus === 'LIVE'
   const grid = liveOccupancyGrid
   const knownPct = grid && grid.cells.length > 0
     ? (grid.cells.filter((cell) => cell !== 'unknown').length / grid.cells.length) * 100
     : 0
+
+  useEffect(() => {
+    ensureMapping()
+  }, [ensureMapping])
 
   return (
     <div className="grid min-h-0 flex-1 gap-3 lg:grid-cols-[minmax(0,1fr)_340px]">
@@ -127,9 +131,21 @@ function ManualMappingWorkspace() {
       </div>
       <aside className="flex min-h-0 flex-col gap-3 overflow-y-auto pr-0.5">
         <GlassPanel corners>
-          <div className="flex items-center gap-2">
-            <Map className="h-4 w-4 text-signal-400" strokeWidth={1.75} />
-            <MicroLabel>Manual SLAM mapping</MicroLabel>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Map className="h-4 w-4 text-signal-400" strokeWidth={1.75} />
+              <MicroLabel>Manual SLAM mapping</MicroLabel>
+            </div>
+            {isLive && (
+              <button
+                type="button"
+                onClick={refreshMap}
+                className="flex items-center gap-1 rounded border border-white/[0.08] bg-white/[0.03] px-2 py-0.5 font-mono text-[9px] uppercase tracking-wider text-ink-300 transition hover:border-signal-400/40 hover:bg-signal-900/30 hover:text-signal-300"
+                title="Reset cached map and refresh ROS SLAM"
+              >
+                Reset Map
+              </button>
+            )}
           </div>
           <div className="mt-2 font-mono text-[13px] uppercase tracking-[0.08em] text-ink-100">
             {isLive ? 'LIVE MAP BUILDING' : 'DEMO MAP PREVIEW'}
