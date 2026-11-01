@@ -206,7 +206,7 @@ export function NavigationStatusPanel() {
 
       {/* Navigation Action Buttons */}
       <div className="mt-3 flex flex-col gap-2">
-        {navigationState === 'READY' && (
+        {Boolean(goal && (navigationState === 'READY' || navigationState === 'IDLE' || navigationState === 'FAILED' || navigationState === 'CANCELED' || navigationState === 'GOAL_REACHED')) && (
           <button
             type="button"
             onClick={startNavigation}

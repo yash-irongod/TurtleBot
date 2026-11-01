@@ -65,11 +65,20 @@ def make_node():
     node._cleanup_complete_event = threading.Event()
     node._cleanup_complete_event.set()
     node._nav_state_lock = threading.RLock()
+    node._nav_lock = asyncio.Lock()
     node._nav_safety_lock_record = None
     node.cmd_vel_pub = FakePublisher()
     node.logger = FakeLogger()
     node.broadcasted = []
     node.last_map_broadcast = 0.0
+    node.virtual_boundary = {
+        "enabled": False,
+        "min_x": -0.6,
+        "max_x": 0.6,
+        "min_y": -0.4,
+        "max_y": 0.4,
+        "safety_margin": 0.12,
+    }
     node._latest_map_payload = None
     node._latest_optimized_map_payload = None
     node.broadcast = node.broadcasted.append
@@ -700,6 +709,307 @@ class SourceSwitchRaceTests(unittest.TestCase):
         self.assertTrue(node._cleanup_in_progress)
         self.assertFalse(node.accepting_commands)
 
+
+class AutonomousMotionProtectionTests(unittest.TestCase):
+    def test_manual_zero_cmd_vel_rejected_when_navigation_owns_motion(self):
+        node = make_node()
+        node.motion_owner = bridge.MOTION_NAVIGATION
+        node.cmd_vel_pub = FakePublisher()
+
+        # Zero cmd_vel must be rejected and must NOT publish zero velocity onto /cmd_vel
+        node.publish_velocity(0.0, 0.0)
+
+        self.assertEqual(len(node.cmd_vel_pub.messages), 0)
+        self.assertEqual(node.motion_owner, bridge.MOTION_NAVIGATION)
+
+    def test_manual_nonzero_cmd_vel_rejected_when_navigation_owns_motion(self):
+        node = make_node()
+        node.motion_owner = bridge.MOTION_NAVIGATION
+        node.cmd_vel_pub = FakePublisher()
+
+        # Non-zero manual drive attempt must also be rejected
+        node.publish_velocity(0.12, 0.0, manual_session_id="test-session-123", new_manual_session=True)
+
+        self.assertEqual(len(node.cmd_vel_pub.messages), 0)
+        self.assertEqual(node.motion_owner, bridge.MOTION_NAVIGATION)
+
+    def test_manual_zero_cmd_vel_rejected_when_exploration_owns_motion(self):
+        node = make_node()
+        node.motion_owner = bridge.MOTION_EXPLORATION
+        node.cmd_vel_pub = FakePublisher()
+
+        node.publish_velocity(0.0, 0.0)
+
+        self.assertEqual(len(node.cmd_vel_pub.messages), 0)
+        self.assertEqual(node.motion_owner, bridge.MOTION_EXPLORATION)
+
+    def test_manual_zero_cmd_vel_accepted_when_manual_owns_motion(self):
+        node = make_node()
+        node.motion_owner = bridge.MOTION_MANUAL
+        node._manual_session_id = "active-manual-session"
+        node.cmd_vel_pub = FakePublisher()
+
+        # When MANUAL owns motion, zero cmd_vel must be published to stop the robot
+        node.publish_velocity(0.0, 0.0)
+
+        self.assertEqual(len(node.cmd_vel_pub.messages), 1)
+        self.assertEqual(node.cmd_vel_pub.messages[0], (0.0, 0.0))
+        self.assertEqual(node.motion_owner, bridge.MOTION_NONE)
+
+    def test_publish_map_pose_broadcasts_formatted_pose(self):
+        node = make_node()
+        node._get_latest_map_pose = lambda: {
+            "position": {"x": 1.25, "y": -0.85},
+            "yaw_rad": 1.57,
+            "timestamp": 1000.0,
+        }
+        messages = []
+        node.broadcast = lambda msg: messages.append(msg)
+
+        node._publish_map_pose()
+
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0]["type"], "pose_map")
+        self.assertEqual(messages[0]["pose"]["position"], {"x": 1.25, "y": -0.85})
+        self.assertEqual(messages[0]["pose"]["yaw_rad"], 1.57)
+
+
+class VirtualBoundarySafetyTests(unittest.TestCase):
+    def test_nav_goal_rejected_when_outside_virtual_boundary(self):
+        node = make_node()
+        node.virtual_boundary = {
+            "enabled": True,
+            "min_x": -1.0,
+            "max_x": 1.0,
+            "min_y": -1.0,
+            "max_y": 1.0,
+            "safety_margin": 0.12,
+        }
+        status_broadcasts = []
+        node._broadcast_nav_status = lambda state, detail: status_broadcasts.append((state, detail))
+
+        # Goal outside X boundary (1.5 > 1.0 - 0.12)
+        asyncio.run(node.navigate_to_goal_async(1.5, 0.0, 0.0))
+        self.assertEqual(len(status_broadcasts), 1)
+        self.assertEqual(status_broadcasts[0][0], "FAILED")
+        self.assertIn("outside tabletop virtual boundary", status_broadcasts[0][1])
+
+    def test_realtime_geofence_halts_navigation_when_boundary_breached(self):
+        node = make_node()
+        node.virtual_boundary = {
+            "enabled": True,
+            "min_x": -0.5,
+            "max_x": 0.5,
+            "min_y": -0.5,
+            "max_y": 0.5,
+            "safety_margin": 0.12,
+        }
+        node.motion_owner = bridge.MOTION_NAVIGATION
+        canceled = []
+        node.cancel_navigation = lambda: canceled.append(True)
+        node.cmd_vel_pub = FakePublisher()
+
+        # Robot at x=0.45 (> max_x - margin = 0.38)
+        node._get_latest_map_pose = lambda: {
+            "position": {"x": 0.45, "y": 0.0},
+            "yaw_rad": 0.0,
+            "timestamp": 1000.0,
+        }
+
+        node._publish_map_pose()
+
+        self.assertEqual(len(canceled), 1)
+        self.assertIn((0.0, 0.0), node.cmd_vel_pub.messages)
+
+    def test_manual_cmd_vel_clamped_at_boundary_edge(self):
+        node = make_node()
+        node.virtual_boundary = {
+            "enabled": True,
+            "min_x": -0.5,
+            "max_x": 0.5,
+            "min_y": -0.5,
+            "max_y": 0.5,
+            "safety_margin": 0.12,
+        }
+        node.motion_owner = bridge.MOTION_MANUAL
+        node._manual_session_id = "test-session"
+        node.cmd_vel_pub = FakePublisher()
+
+        # Robot at x=0.45 facing +X (yaw=0.0, dx=1.0)
+        node._get_latest_map_pose = lambda: {
+            "position": {"x": 0.45, "y": 0.0},
+            "yaw_rad": 0.0,
+            "timestamp": 1000.0,
+        }
+
+        # Driving forward towards the +X edge must be clamped to 0.0 linear
+        node.publish_velocity(0.12, 0.0, manual_session_id="test-session", new_manual_session=False)
+
+        self.assertEqual(len(node.cmd_vel_pub.messages), 1)
+        # Linear velocity clamped to 0.0
+        self.assertEqual(node.cmd_vel_pub.messages[0], (0.0, 0.0))
+
+
+
+    def test_publish_tabletop_boundary_publishes_cloud_when_enabled(self):
+        node = make_node()
+        node.virtual_boundary = {
+            "enabled": True,
+            "min_x": -0.6,
+            "max_x": 0.6,
+            "min_y": -0.4,
+            "max_y": 0.4,
+            "safety_margin": 0.08,
+        }
+        published = []
+        node.boundary_cloud_pub = type("FakeCloudPub", (), {"publish": lambda self, msg: published.append(msg)})()
+        orig_cloud = bridge.PointCloud2
+        orig_field = bridge.PointField
+        class MockHeader:
+            def __init__(self):
+                self.frame_id = "map"
+                self.stamp = None
+        class MockPC2:
+            def __init__(self):
+                self.header = MockHeader()
+                self.height = 1
+                self.width = 0
+                self.fields = []
+                self.is_bigendian = False
+                self.point_step = 12
+                self.row_step = 0
+                self.is_dense = True
+                self.data = b""
+
+        bridge.PointCloud2 = MockPC2
+        class MockPF:
+            FLOAT32 = 7
+            def __init__(self, name="", offset=0, datatype=0, count=1):
+                self.name = name
+                self.offset = offset
+                self.datatype = datatype
+                self.count = count
+        bridge.PointField = MockPF
+
+        try:
+            node._publish_tabletop_boundary()
+            self.assertEqual(len(published), 1)
+            msg = published[0]
+            self.assertEqual(msg.header.frame_id, "map")
+            self.assertGreater(msg.width, 10)
+        finally:
+            bridge.PointCloud2 = orig_cloud
+            bridge.PointField = orig_field
+
+    def test_on_plan_does_not_cancel_navigation(self):
+        node = make_node()
+        node.virtual_boundary = {
+            "enabled": True,
+            "min_x": -0.5,
+            "max_x": 0.5,
+            "min_y": -0.5,
+            "max_y": 0.5,
+            "safety_margin": 0.08,
+        }
+        node.motion_owner = bridge.MOTION_NAVIGATION
+        canceled = []
+        node.cancel_navigation = lambda: canceled.append(True)
+        # Create a mock path msg that reaches outside table
+        pose_mock = type("PoseStampedMock", (), {
+            "pose": type("PoseMock", (), {"position": type("Pos", (), {"x": 0.9, "y": 0.9})()})()
+        })()
+        path_msg = type("PathMsg", (), {
+            "poses": [pose_mock],
+            "header": type("Header", (), {"frame_id": "map"})(),
+        })()
+        node.last_plan_broadcast = 0.0
+        node._on_plan(path_msg)
+        # Verify navigation was NOT canceled
+        self.assertEqual(len(canceled), 0)
+
+
+    def test_is_point_inside_boundary_axis_aligned(self):
+        node = make_node()
+        node.virtual_boundary = {
+            "enabled": True,
+            "min_x": -1.0,
+            "max_x": 1.0,
+            "min_y": -0.5,
+            "max_y": 0.5,
+            "safety_margin": 0.08,
+            "rotation_deg": 0.0,
+        }
+        self.assertTrue(node.is_point_inside_boundary(0.0, 0.0))
+        self.assertTrue(node.is_point_inside_boundary(0.90, 0.40))
+        self.assertFalse(node.is_point_inside_boundary(0.95, 0.0))
+        self.assertFalse(node.is_point_inside_boundary(0.0, 0.45))
+
+    def test_is_point_inside_boundary_rotated_90(self):
+        node = make_node()
+        node.virtual_boundary = {
+            "enabled": True,
+            "min_x": -1.0,
+            "max_x": 1.0,
+            "min_y": -0.5,
+            "max_y": 0.5,
+            "safety_margin": 0.08,
+            "rotation_deg": 90.0,
+        }
+        self.assertTrue(node.is_point_inside_boundary(0.0, 0.0))
+        self.assertTrue(node.is_point_inside_boundary(0.0, 0.90))
+        self.assertFalse(node.is_point_inside_boundary(0.45, 0.0))
+
+    def test_plan_goal_blocking_rejects_outside_boundary(self):
+        node = make_node()
+        node.virtual_boundary = {
+            "enabled": True,
+            "min_x": -0.5,
+            "max_x": 0.5,
+            "min_y": -0.5,
+            "max_y": 0.5,
+            "safety_margin": 0.08,
+        }
+        broadcasts = []
+        node.broadcast = lambda msg: broadcasts.append(msg)
+        node._plan_goal_blocking(2.0, 2.0, 0.0)
+        self.assertEqual(len(broadcasts), 1)
+        self.assertEqual(broadcasts[0]["type"], "nav_plan")
+        self.assertEqual(broadcasts[0]["navigation"]["status"], "REJECTED_OUTSIDE_BOUNDARY")
+
+    def test_is_step_safe_prevents_driving_off_edge_but_allows_reversing(self):
+        node = make_node()
+        node.virtual_boundary = {
+            "enabled": True,
+            "min_x": -0.5,
+            "max_x": 0.5,
+            "min_y": -0.5,
+            "max_y": 0.5,
+            "safety_margin": 0.08,
+            "rotation_deg": 0.0,
+        }
+        # Robot near +X edge at (0.40, 0.0). hw=0.5, margin=0.08 => limit_u = 0.42.
+        # Moving outward to (0.44, 0.0) crosses limit and increases violation -> False
+        self.assertFalse(node.is_step_safe(0.40, 0.0, 0.44, 0.0, margin=0.08))
+        # Moving inward to (0.36, 0.0) reduces distance from center -> True
+        self.assertTrue(node.is_step_safe(0.40, 0.0, 0.36, 0.0, margin=0.08))
+
+    def test_is_step_safe_with_rotation(self):
+        node = make_node()
+        node.virtual_boundary = {
+            "enabled": True,
+            "min_x": -1.0,
+            "max_x": 1.0,
+            "min_y": -0.5,
+            "max_y": 0.5,
+            "safety_margin": 0.08,
+            "rotation_deg": 90.0,
+        }
+        # Table rotated 90 deg: long dimension (hw=1.0) is along Y, short dimension (hl=0.5) is along X.
+        # Robot at (0.0, 0.90) near +Y edge: limit in Y is 1.0 - 0.08 = 0.92.
+        # Stepping outward to (0.0, 0.95) -> False
+        self.assertFalse(node.is_step_safe(0.0, 0.90, 0.0, 0.95, margin=0.08))
+        # Stepping inward to (0.0, 0.85) -> True
+        self.assertTrue(node.is_step_safe(0.0, 0.90, 0.0, 0.85, margin=0.08))
 
 if __name__ == "__main__":
     unittest.main()

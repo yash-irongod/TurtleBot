@@ -316,4 +316,23 @@ export interface RobotDataSource {
   /** Optional bridge WebSocket endpoint URL management */
   getBridgeUrl?(): string
   setBridgeUrl?(url: string): void
+  /** Optional virtual boundary management */
+  setVirtualBoundary?(boundary: VirtualBoundary): void
+  subscribeVirtualBoundary?(listener: (boundary: VirtualBoundary) => void): () => void
+}
+
+/**
+ * Tabletop / geofence virtual boundary definition (in map-frame metres).
+ * Used to prevent the robot from driving off table edges or restricted perimeters.
+ */
+export interface VirtualBoundary {
+  enabled: boolean
+  minX: number
+  maxX: number
+  minY: number
+  maxY: number
+  /** Safety buffer distance in metres inside the boundary (default: 0.12 m, approx. robot swept radius). */
+  safetyMarginM: number
+  /** Manual table orientation rotation in degrees (0 = aligned with map X axis). */
+  rotationDeg?: number
 }

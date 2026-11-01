@@ -3,8 +3,14 @@ import type { DriveKey, VelocityCommand } from '../types/robot'
 import { clamp } from '../lib/polar'
 import { SAFE_ANGULAR_RADPS, SAFE_LINEAR_MPS, SAFE_REVERSE_MPS } from '../lib/safety'
 
-function isDriveKey(key: string): key is DriveKey {
-  return key === 'w' || key === 'a' || key === 's' || key === 'd'
+function toDriveKey(event: KeyboardEvent): DriveKey | null {
+  const key = event.key.toLowerCase()
+  const code = event.code
+  if (key === 'w' || code === 'KeyW' || key === 'arrowup' || code === 'ArrowUp') return 'w'
+  if (key === 's' || code === 'KeyS' || key === 'arrowdown' || code === 'ArrowDown') return 's'
+  if (key === 'a' || code === 'KeyA' || key === 'arrowleft' || code === 'ArrowLeft') return 'a'
+  if (key === 'd' || code === 'KeyD' || key === 'arrowright' || code === 'ArrowRight') return 'd'
+  return null
 }
 
 function isTypingTarget(target: EventTarget | null): boolean {
@@ -31,23 +37,23 @@ interface UseKeyboardDriveOptions {
   enabled: boolean
   onCommand: (v: VelocityCommand) => void
   onRelease: () => void
+  onSpace?: () => void
 }
 
 /**
- * First-class WASD + space keyboard drive. A genuine new keydown is required
- * to create a command: held keys are forgotten whenever input is disabled,
- * the window loses focus, or the page is hidden. Callbacks are held in refs
- * so the listener always uses the current command boundary without repeated
- * attachment on every render.
+ * First-class WASD + arrow keys + space keyboard drive.
+ * A genuine keydown initiates motion. While keys are held down, OS repeat
+ * refreshes the command intent to ensure continuous velocity streaming.
+ * Callbacks are held in refs so the listener always uses the current command boundary.
  */
-export function useKeyboardDrive({ enabled, onCommand, onRelease }: UseKeyboardDriveOptions) {
+export function useKeyboardDrive({ enabled, onCommand, onRelease, onSpace }: UseKeyboardDriveOptions) {
   const [activeKeys, setActiveKeys] = useState<ReadonlySet<DriveKey>>(new Set())
   const heldRef = useRef<Set<DriveKey>>(new Set())
-  const callbacksRef = useRef({ onCommand, onRelease })
+  const callbacksRef = useRef({ onCommand, onRelease, onSpace })
 
   useEffect(() => {
-    callbacksRef.current = { onCommand, onRelease }
-  }, [onCommand, onRelease])
+    callbacksRef.current = { onCommand, onRelease, onSpace }
+  }, [onCommand, onRelease, onSpace])
 
   useEffect(() => {
     const stopAll = () => {
@@ -86,21 +92,31 @@ export function useKeyboardDrive({ enabled, onCommand, onRelease }: UseKeyboardD
       if (event.code === 'Space') {
         event.preventDefault()
         stopAll()
+        callbacksRef.current.onSpace?.()
         return
       }
-      // A key held through an e-stop reset must not re-arm via OS repeat.
-      if (event.repeat) return
-      const key = event.key.toLowerCase()
-      if (!isDriveKey(key) || heldRef.current.has(key)) return
+
+      const driveKey = toDriveKey(event)
+      if (!driveKey) return
+
       event.preventDefault()
-      heldRef.current.add(key)
+
+      if (event.repeat) {
+        // If the drive key is held, re-apply commands to keep manual lease alive
+        if (heldRef.current.has(driveKey)) {
+          applyHeld()
+        }
+        return
+      }
+
+      heldRef.current.add(driveKey)
       applyHeld()
     }
 
     const handleKeyUp = (event: KeyboardEvent) => {
-      const key = event.key.toLowerCase()
-      if (!isDriveKey(key)) return
-      heldRef.current.delete(key)
+      const driveKey = toDriveKey(event)
+      if (!driveKey) return
+      heldRef.current.delete(driveKey)
       applyHeld()
     }
 

@@ -36,6 +36,7 @@ import json
 import math
 import os
 import signal
+import struct
 import subprocess
 import sys
 import threading
@@ -66,15 +67,16 @@ try:
     from action_msgs.msg import GoalStatus
     from geometry_msgs.msg import Point, PointStamped, Pose, PoseArray, PoseStamped, PoseWithCovarianceStamped, Quaternion, Twist
     from nav_msgs.msg import OccupancyGrid, Odometry, Path
-    from sensor_msgs.msg import BatteryState, Imu, LaserScan
+    from sensor_msgs.msg import BatteryState, Imu, LaserScan, PointCloud2, PointField
     from visualization_msgs.msg import Marker, MarkerArray
 
     try:
-        from nav2_msgs.action import NavigateToPose
+        from nav2_msgs.action import NavigateToPose, ComputePathToPose
         HAS_NAV2 = True
     except ImportError:
         HAS_NAV2 = False
         NavigateToPose = None
+        ComputePathToPose = None
 
     try:
         from tf2_ros import Buffer, TransformListener
@@ -84,11 +86,20 @@ try:
         Buffer = None
         TransformListener = None
 
+    try:
+        from lifecycle_msgs.srv import GetState as LifecycleGetState
+        HAS_LIFECYCLE_MSGS = True
+    except ImportError:
+        HAS_LIFECYCLE_MSGS = False
+        LifecycleGetState = None
+
 except ImportError as e:
     print(f"[ERROR] Failed to import ROS 2 modules: {e}", file=sys.stderr)
     print("[INFO] Ensure you have sourced your ROS 2 environment: source ~/turtlebot_env.sh", file=sys.stderr)
     # Allow compile-checking without ROS environment
     rclpy = None
+    PointCloud2 = None
+    PointField = None
 
 try:
     import websockets
@@ -172,6 +183,15 @@ class ExplorationProcessRecord:
 class TurtleBotBridgeNode:
     """ROS 2 Node managing publishers, subscribers, Nav2 ActionClient, and exploration subprocess."""
 
+    virtual_boundary = {
+        "enabled": False,
+        "min_x": -0.6,
+        "max_x": 0.6,
+        "min_y": -0.4,
+        "max_y": 0.4,
+        "safety_margin": 0.08,
+    }
+
     def __init__(self, broadcast_callback):
         self.broadcast = broadcast_callback
         self.node = rclpy.create_node("turtlebot_web_bridge")
@@ -253,11 +273,23 @@ class TurtleBotBridgeNode:
         self.plan_sub = self.node.create_subscription(Path, "/plan", self._on_plan, 10)
         self.global_plan_sub = self.node.create_subscription(Path, "/global_plan", self._on_plan, 10)
         self.local_plan_sub = self.node.create_subscription(Path, "/local_plan", self._on_local_plan, 10)
+        if PointCloud2 is not None:
+            try:
+                self.boundary_cloud_pub = self.node.create_publisher(PointCloud2, "/tabletop_boundary", 10)
+            except Exception:
+                self.boundary_cloud_pub = None
+        else:
+            self.boundary_cloud_pub = None
+        self._last_boundary_pub = 0.0
         self.last_plan_broadcast = 0.0
         self.last_local_plan_broadcast = 0.0
+        self.map_pose_timer = None
+        if hasattr(self.node, "create_timer"):
+            self.map_pose_timer = self.node.create_timer(0.033, self._publish_map_pose)
 
         # 4. Nav2 NavigateToPose ActionClient
         self.nav_client = None
+        self.plan_client = None
         self.current_goal_handle = None
         self.nav_state = "IDLE"
         self.current_goal_pose = None
@@ -272,8 +304,24 @@ class TurtleBotBridgeNode:
         if HAS_NAV2:
             self.nav_client = ActionClient(self.node, NavigateToPose, "navigate_to_pose")
             self.logger.info("Nav2 NavigateToPose ActionClient initialized on /navigate_to_pose")
+            if ComputePathToPose is not None:
+                self.plan_client = ActionClient(self.node, ComputePathToPose, "compute_path_to_pose")
+                self.logger.info("Nav2 ComputePathToPose ActionClient initialized on /compute_path_to_pose")
         else:
             self.logger.warn("nav2_msgs.action.NavigateToPose not found; Nav2 action client disabled")
+
+        # Nav2 lifecycle readiness flag — set True after bt_navigator is confirmed active.
+        # Reset on goal rejection so the next attempt re-checks.
+        self._nav2_confirmed_active = False
+        self._lifecycle_client = None
+
+        # Robot clock synchronization tracker (offline mobile hotspot time fix)
+        self._last_clock_sync_at: float = 0.0
+
+        # High-frequency map-frame odometry fusion cache
+        self._latest_map_to_odom = None
+        self._last_map_to_odom_lookup: float = 0.0
+        self._last_tf_map_pose = None
 
         # 5. Frontier Explorer subscriptions
         self.frontiers_sub = None
@@ -287,6 +335,8 @@ class TurtleBotBridgeNode:
         self._explore_record: Optional[ExplorationProcessRecord] = None
         self.mapping_process: Optional[subprocess.Popen] = None
         self.mapping_process_started_by_bridge = False
+        self._mapping_stack_lock = threading.Lock()
+        self._mapping_stack_in_progress = False
 
         # Motion ownership: NONE, MANUAL, NAVIGATION, EXPLORATION.
         # Every acquisition/release is protected by one lock so no two motion sources
@@ -333,8 +383,25 @@ class TurtleBotBridgeNode:
         self._latest_map_payload: Optional[Dict[str, Any]] = None
         self._latest_optimized_map_payload: Optional[Dict[str, Any]] = None
 
+        # Virtual Boundary / Tabletop Edge Protection
+        self.virtual_boundary: Dict[str, Any] = {
+            "enabled": False,
+            "min_x": -0.6,
+            "max_x": 0.6,
+            "min_y": -0.4,
+            "max_y": 0.4,
+            "safety_margin": 0.08,
+        }
+        self._boundary_file = os.path.expanduser("~/turtlebot3_ws/config/virtual_boundary.json")
+        self._load_virtual_boundary()
+
         self._setup_exploration_subscribers(map_qos)
         self._manual_watchdog_thread.start()
+
+        # Kick off background clock synchronization with the robot (critical for offline hotspot)
+        threading.Thread(
+            target=self._sync_robot_clock, name="robot-clock-sync", daemon=True
+        ).start()
 
         # Rate-limiting timestamps
         self.last_odom_broadcast = 0.0
@@ -345,6 +412,33 @@ class TurtleBotBridgeNode:
         self._last_opt_map_broadcast = 0.0
 
         self.logger.info("Bridge Node initialized successfully.")
+
+    def _load_virtual_boundary(self):
+        try:
+            if os.path.exists(self._boundary_file):
+                with open(self._boundary_file, "r") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        self.virtual_boundary = {
+                            "enabled": bool(data.get("enabled", False)),
+                            "min_x": float(data.get("min_x", -0.6)),
+                            "max_x": float(data.get("max_x", 0.6)),
+                            "min_y": float(data.get("min_y", -0.4)),
+                            "max_y": float(data.get("max_y", 0.4)),
+                            "safety_margin": float(data.get("safety_margin", 0.08)),
+                            "rotation_deg": float(data.get("rotation_deg", data.get("rotationDeg", 0.0))),
+                        }
+                        self.logger.info(f"Loaded virtual boundary from config: {self.virtual_boundary}")
+        except Exception as exc:
+            self.logger.warn(f"Could not load virtual boundary: {exc}")
+
+    def _save_virtual_boundary(self):
+        try:
+            os.makedirs(os.path.dirname(self._boundary_file), exist_ok=True)
+            with open(self._boundary_file, "w") as f:
+                json.dump(self.virtual_boundary, f, indent=2)
+        except Exception as exc:
+            self.logger.warn(f"Could not save virtual boundary: {exc}")
 
     def _setup_exploration_subscribers(self, map_qos):
         """Sets up subscribers for frontier explorer outputs."""
@@ -410,10 +504,14 @@ class TurtleBotBridgeNode:
             pass
 
     def _get_latest_map_pose(self) -> Optional[Dict[str, Any]]:
-        """Resolve the latest robot pose in the map frame via TF or direct SLAM pose."""
-        # 1. Try TF buffer lookup first (non-blocking lookup of latest transform)
+        """Resolve the latest robot pose in the map frame via direct TF or SLAM topic.
+
+        Uses non-blocking TF lookup (timeout=0) to prevent single-threaded ROS executor
+        starvation, eliminating 1-second lag and packet burst stuttering.
+        """
+        # 1. Non-blocking direct TF buffer lookup (base_footprint first, then base_link)
         if self.tf_buffer is not None:
-            for base_frame in BASE_FRAMES:
+            for base_frame in ("base_footprint", "base_link"):
                 try:
                     tf_stamped = self.tf_buffer.lookup_transform(
                         MAP_FRAME,
@@ -426,23 +524,206 @@ class TurtleBotBridgeNode:
                     siny_cosp = 2.0 * (rot.w * rot.z + rot.x * rot.y)
                     cosy_cosp = 1.0 - 2.0 * (rot.y * rot.y + rot.z * rot.z)
                     yaw_rad = math.atan2(siny_cosp, cosy_cosp)
-                    return {
+                    pose = {
                         "position": {"x": float(trans.x), "y": float(trans.y)},
                         "yaw_rad": float(yaw_rad),
                         "orientation": {"x": rot.x, "y": rot.y, "z": rot.z, "w": rot.w},
+                        "timestamp": time.time(),
                     }
+                    self._last_tf_map_pose = pose
+                    return pose
                 except Exception:
                     continue
 
-        # 2. Fall back to subscribed topic map_pose if recent (< 5.0s)
-        if self.map_pose is not None and (time.time() - self.map_pose.get("timestamp", 0) < 5.0):
+        # 2. Authoritative direct SLAM pose from /tracked_pose (published by Cartographer)
+        if self.map_pose is not None and (time.time() - self.map_pose.get("timestamp", 0) < 0.5):
             return {
                 "position": self.map_pose["position"],
                 "yaw_rad": self.map_pose["yaw_rad"],
                 "orientation": self.map_pose["orientation"],
             }
 
+        # 3. Fall back to fresh cached TF pose (< 0.5s) to absorb momentary TF cycle gaps
+        if hasattr(self, "_last_tf_map_pose") and self._last_tf_map_pose is not None:
+            if time.time() - self._last_tf_map_pose.get("timestamp", 0) < 0.5:
+                return self._last_tf_map_pose
+
         return None
+
+
+    def is_point_inside_boundary(self, x: float, y: float, margin: float = 0.08) -> bool:
+        """Check if (x, y) in map frame lies safely inside virtual boundary."""
+        if not self.virtual_boundary.get("enabled"):
+            return True
+        b = self.virtual_boundary
+        min_x = float(b.get("min_x", -0.6))
+        max_x = float(b.get("max_x", 0.6))
+        min_y = float(b.get("min_y", -0.4))
+        max_y = float(b.get("max_y", 0.4))
+        if max_x <= min_x or max_y <= min_y:
+            return True
+        rot_deg = float(b.get("rotation_deg", b.get("rotationDeg", 0.0)))
+        cx = (min_x + max_x) / 2.0
+        cy = (min_y + max_y) / 2.0
+        hw = max(0.05, (max_x - min_x) / 2.0)
+        hl = max(0.05, (max_y - min_y) / 2.0)
+        if abs(rot_deg) > 1e-3:
+            rad = math.radians(rot_deg)
+            cos_a = math.cos(rad)
+            sin_a = math.sin(rad)
+            dx = x - cx
+            dy = y - cy
+            u = dx * cos_a + dy * sin_a
+            v = -dx * sin_a + dy * cos_a
+            return abs(u) <= (hw - margin) and abs(v) <= (hl - margin)
+        else:
+            return (min_x + margin <= x <= max_x - margin) and (min_y + margin <= y <= max_y - margin)
+
+    def is_step_safe(self, curr_x: float, curr_y: float, next_x: float, next_y: float, margin: float = 0.06) -> bool:
+        """Check if moving from (curr_x, curr_y) to (next_x, next_y) is safe within virtual boundary."""
+        if not self.virtual_boundary.get("enabled"):
+            return True
+        b = self.virtual_boundary
+        min_x = float(b.get("min_x", -0.6))
+        max_x = float(b.get("max_x", 0.6))
+        min_y = float(b.get("min_y", -0.4))
+        max_y = float(b.get("max_y", 0.4))
+        if max_x <= min_x or max_y <= min_y:
+            return True
+        rot_deg = float(b.get("rotation_deg", b.get("rotationDeg", 0.0)))
+        cx = (min_x + max_x) / 2.0
+        cy = (min_y + max_y) / 2.0
+        hw = max(0.05, (max_x - min_x) / 2.0)
+        hl = max(0.05, (max_y - min_y) / 2.0)
+
+        rad = math.radians(rot_deg) if abs(rot_deg) > 1e-3 else 0.0
+        cos_a = math.cos(rad)
+        sin_a = math.sin(rad)
+
+        curr_u = (curr_x - cx) * cos_a + (curr_y - cy) * sin_a
+        curr_v = -(curr_x - cx) * sin_a + (curr_y - cy) * cos_a
+        next_u = (next_x - cx) * cos_a + (next_y - cy) * sin_a
+        next_v = -(next_x - cx) * sin_a + (next_y - cy) * cos_a
+
+        limit_u = max(0.0, hw - margin)
+        limit_v = max(0.0, hl - margin)
+
+        if abs(next_u) <= limit_u and abs(next_v) <= limit_v:
+            return True
+
+        violating_u = abs(next_u) > limit_u and abs(next_u) >= abs(curr_u)
+        violating_v = abs(next_v) > limit_v and abs(next_v) >= abs(curr_v)
+        if violating_u or violating_v:
+            return False
+
+        return True
+
+    def _publish_tabletop_boundary(self):
+        if not hasattr(self, "boundary_cloud_pub") or self.boundary_cloud_pub is None:
+            return
+        if not self.virtual_boundary.get("enabled"):
+            return
+        try:
+            b = self.virtual_boundary
+            min_x = float(b["min_x"])
+            max_x = float(b["max_x"])
+            min_y = float(b["min_y"])
+            max_y = float(b["max_y"])
+            if max_x <= min_x or max_y <= min_y:
+                return
+
+            cx = (min_x + max_x) / 2.0
+            cy = (min_y + max_y) / 2.0
+            hw = (max_x - min_x) / 2.0
+            hl = (max_y - min_y) / 2.0
+            rot_deg = float(b.get("rotation_deg", b.get("rotationDeg", 0.0)))
+
+            points = []
+            step = 0.04
+            rad = math.radians(rot_deg)
+            cos_a = math.cos(rad)
+            sin_a = math.sin(rad)
+
+            def to_world(u, v):
+                return (cx + u * cos_a - v * sin_a, cy + u * sin_a + v * cos_a, 0.05)
+
+            # Perimeter and 4cm outer buffer strip
+            u = -hw
+            while u <= hw + 0.001:
+                points.append(to_world(u, hl))
+                points.append(to_world(u, -hl))
+                points.append(to_world(u, hl + 0.04))
+                points.append(to_world(u, -hl - 0.04))
+                u += step
+            v = -hl
+            while v <= hl + 0.001:
+                points.append(to_world(-hw, v))
+                points.append(to_world(hw, v))
+                points.append(to_world(-hw - 0.04, v))
+                points.append(to_world(hw + 0.04, v))
+                v += step
+
+            if not points or PointCloud2 is None or PointField is None:
+                return
+
+            msg = PointCloud2()
+            if hasattr(self, "node") and hasattr(self.node, "get_clock"):
+                msg.header.stamp = self.node.get_clock().now().to_msg()
+            msg.header.frame_id = "map"
+            msg.height = 1
+            msg.width = len(points)
+            msg.fields = [
+                PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
+                PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
+                PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
+            ]
+            msg.is_bigendian = False
+            msg.point_step = 12
+            msg.row_step = 12 * len(points)
+            msg.is_dense = True
+            buffer = bytearray()
+            for px, py, pz in points:
+                buffer.extend(struct.pack("fff", float(px), float(py), float(pz)))
+            msg.data = bytes(buffer)
+            self.boundary_cloud_pub.publish(msg)
+        except Exception as exc:
+            self.logger.debug(f"Boundary cloud publish note: {exc}")
+
+    def _publish_map_pose(self):
+        pose = self._get_latest_map_pose()
+        if pose is not None:
+            if self.virtual_boundary.get("enabled"):
+                b = self.virtual_boundary
+                rx = pose["position"]["x"]
+                ry = pose["position"]["y"]
+                m = b.get("safety_margin", 0.08)
+                is_breaching = not self.is_point_inside_boundary(rx, ry, margin=m)
+                if is_breaching:
+                    if self.motion_owner == MOTION_NAVIGATION:
+                        self.logger.error(f"VIRTUAL BOUNDARY LIMIT REACHED at ({rx:.2f}, {ry:.2f})! Halting motion for table safety.")
+                        self.cancel_navigation()
+                        if self.cmd_vel_pub is not None:
+                            msg = Twist()
+                            self.cmd_vel_pub.publish(msg)
+                        self.broadcast({
+                            "type": "boundary_alert",
+                            "status": "BREACH",
+                            "message": "Virtual boundary limit reached — robot halted for table edge safety",
+                        })
+            self.broadcast({
+                "type": "pose_map",
+                "pose": {
+                    "position": pose["position"],
+                    "yaw_rad": pose["yaw_rad"],
+                    "timestamp": pose.get("timestamp", time.time()),
+                }
+            })
+
+        # Periodic boundary obstacle broadcast for Nav2 costmaps
+        now_mono = time.monotonic()
+        if hasattr(self, "_last_boundary_pub") and now_mono - self._last_boundary_pub > 1.0:
+            self._last_boundary_pub = now_mono
+            self._publish_tabletop_boundary()
 
     def _on_plan(self, msg: Path):
         now = time.time()
@@ -450,6 +731,7 @@ class TurtleBotBridgeNode:
             return
         self.last_plan_broadcast = now
         path_points = [{"x": float(p.pose.position.x), "y": float(p.pose.position.y)} for p in msg.poses]
+        # Tabletop boundary is enforced in Nav2 costmap as lethal obstacles and by the 20 Hz map pose geofence.
         payload = {
             "type": "nav_plan",
             "navigation": {
@@ -464,19 +746,52 @@ class TurtleBotBridgeNode:
         if now - self.last_local_plan_broadcast < 0.2:
             return
         self.last_local_plan_broadcast = now
-        path_points = [{"x": float(p.pose.position.x), "y": float(p.pose.position.y)} for p in msg.poses]
+
+        frame_id = str(getattr(msg.header, "frame_id", ""))
+        transform = None
+        if frame_id and frame_id != MAP_FRAME and self.tf_buffer is not None:
+            try:
+                tf_stamped = self.tf_buffer.lookup_transform(
+                    MAP_FRAME,
+                    frame_id,
+                    rclpy.time.Time(),
+                    timeout=rclpy.duration.Duration(seconds=0.0),
+                )
+                transform = tf_stamped.transform
+            except Exception:
+                transform = None
+
+        path_points = []
+        for p in msg.poses:
+            x = float(p.pose.position.x)
+            y = float(p.pose.position.y)
+            if transform is not None:
+                tx = transform.translation.x
+                ty = transform.translation.y
+                rot = transform.rotation
+                siny_cosp = 2.0 * (rot.w * rot.z + rot.x * rot.y)
+                cosy_cosp = 1.0 - 2.0 * (rot.y * rot.y + rot.z * rot.z)
+                yaw = math.atan2(siny_cosp, cosy_cosp)
+                cos_y = math.cos(yaw)
+                sin_y = math.sin(yaw)
+                px = tx + (x * cos_y - y * sin_y)
+                py = ty + (x * sin_y + y * cos_y)
+                path_points.append({"x": px, "y": py})
+            elif frame_id == MAP_FRAME or not frame_id:
+                path_points.append({"x": x, "y": y})
+
         payload = {
             "type": "nav_local_plan",
             "navigation": {
                 "local_path": path_points,
-                "frame_id": str(getattr(msg.header, "frame_id", "")),
+                "frame_id": MAP_FRAME,
             },
         }
         self.broadcast(payload)
 
     def _on_odom(self, msg: Odometry):
         now = time.time()
-        if now - self.last_odom_broadcast < 0.05:  # max ~20 Hz
+        if now - self.last_odom_broadcast < 0.033:  # max ~30 Hz
             return
         self.last_odom_broadcast = now
 
@@ -633,7 +948,20 @@ class TurtleBotBridgeNode:
         self.ensure_mapping_stack_async()
 
     def ensure_mapping_stack_async(self):
-        """Asynchronously ensure Cartographer + Nav2 are running without blocking."""
+        """Asynchronously ensure Cartographer + Nav2 are running with single-flight concurrency protection."""
+        with self._mapping_stack_lock:
+            if self._mapping_stack_in_progress:
+                self.logger.info("Mapping stack launch already in progress; skipping duplicate request")
+                return
+            if (
+                self._nav2_confirmed_active
+                and self.mapping_process is not None
+                and self.mapping_process.poll() is None
+            ):
+                self.broadcast({"type": "mapping_status", "status": "ready"})
+                return
+            self._mapping_stack_in_progress = True
+
         def _worker():
             try:
                 self.broadcast({"type": "mapping_status", "status": "starting"})
@@ -646,6 +974,10 @@ class TurtleBotBridgeNode:
                 if hasattr(self, "logger"):
                     self.logger.warn(f"ensure_mapping_stack_async exception: {exc}")
                 self.broadcast({"type": "mapping_status", "status": "error"})
+            finally:
+                with self._mapping_stack_lock:
+                    self._mapping_stack_in_progress = False
+
         threading.Thread(target=_worker, daemon=True, name="ensure_mapping_stack").start()
 
     def _on_optimized_map(self, msg: OccupancyGrid):
@@ -710,6 +1042,170 @@ class TurtleBotBridgeNode:
             },
         }
         self.broadcast(payload)
+
+    # --------------------------------------------------------------------------
+    # Nav2 Lifecycle Readiness
+    # --------------------------------------------------------------------------
+    def _wait_for_nav2_lifecycle_active(self, timeout_sec: float = 30.0) -> bool:
+        """Wait for bt_navigator to reach 'active' lifecycle state (id=3).
+
+        Without this check, the action server exists (wait_for_server returns True)
+        but rejects all goals because the lifecycle manager hasn't activated it yet.
+        """
+        if not HAS_LIFECYCLE_MSGS or LifecycleGetState is None:
+            self.logger.warn("lifecycle_msgs unavailable; using 8s fallback delay for Nav2 activation")
+            time.sleep(8.0)
+            return True
+
+        if self._lifecycle_client is None:
+            self._lifecycle_client = self.node.create_client(
+                LifecycleGetState, '/bt_navigator/get_state'
+            )
+        client = self._lifecycle_client
+
+        if not client.wait_for_service(timeout_sec=min(timeout_sec, 10.0)):
+            self.logger.warn("/bt_navigator/get_state service not available; using 8s fallback delay")
+            time.sleep(8.0)
+            return True
+
+        deadline = time.monotonic() + timeout_sec
+        while time.monotonic() < deadline:
+            req = LifecycleGetState.Request()
+            future = client.call_async(req)
+            # Wait for the future to complete (MultiThreadedExecutor processes it)
+            wait_end = time.monotonic() + 3.0
+            while not future.done() and time.monotonic() < wait_end:
+                time.sleep(0.1)
+
+            if future.done():
+                try:
+                    result = future.result()
+                except Exception:
+                    result = None
+                if result is not None:
+                    state = result.current_state
+                    if state.id == 3:  # PRIMARY_STATE_ACTIVE
+                        self.logger.info(
+                            f"bt_navigator lifecycle: {state.label} (id={state.id}) "
+                            f"-- Nav2 ready for goals"
+                        )
+                        self._nav2_confirmed_active = True
+                        return True
+                    self.logger.info(
+                        f"bt_navigator lifecycle: {state.label} (id={state.id}), "
+                        f"waiting for 'active'..."
+                    )
+            else:
+                self.logger.info("bt_navigator lifecycle service call timed out, retrying...")
+
+            time.sleep(2.0)
+
+        self.logger.error(
+            f"bt_navigator did not reach 'active' state within {timeout_sec:.0f}s"
+        )
+        return False
+
+    def _sync_robot_clock(self, target_host: Optional[str] = None, max_skew_sec: float = 0.2) -> bool:
+        """Synchronize the Raspberry Pi system clock with the VM clock over SSH.
+
+        On an offline hotspot without internet, Raspberry Pi 4 boots with a frozen/stale
+        time (no hardware RTC battery). If the Pi and VM clocks differ by more than ~0.2 second,
+        ROS 2 TF transforms fail ('Lookup would require extrapolation into the past'),
+        costmaps freeze, and Nav2 rejects goals.
+
+        Uses passwordless SSH (configured via ssh-copy-id turtlebot@raspberrypi.local).
+        NEVER restarts docker containers mid-session to avoid destroying odometry or hardware nodes.
+        """
+        now = time.monotonic()
+        if now - getattr(self, "_last_clock_sync_at", 0.0) < 15.0:
+            return True
+
+        host = target_host or os.environ.get("ROBOT_HOST", "raspberrypi.local")
+        try:
+            # 1. Probe the Pi clock
+            check_cmd = [
+                "ssh", "-o", "ConnectTimeout=3", "-o", "StrictHostKeyChecking=no",
+                f"turtlebot@{host}", "date +%s"
+            ]
+            res = subprocess.run(check_cmd, capture_output=True, text=True, timeout=5.0)
+            if res.returncode != 0:
+                self.logger.warn(f"Clock probe to {host} returned {res.returncode}: {res.stderr.strip() or 'failed'}")
+                return False
+
+            pi_epoch = float(res.stdout.strip())
+            vm_epoch = time.time()
+            skew = abs(vm_epoch - pi_epoch)
+
+            if skew <= max_skew_sec:
+                self.logger.info(f"Robot clock is in sync with VM (skew: {skew:.3f}s)")
+                self._last_clock_sync_at = now
+                return True
+
+            self.logger.warn(
+                f"Robot clock skew is {skew:.1f}s (VM: {vm_epoch:.0f}, Pi: {pi_epoch:.0f}). Synchronizing..."
+            )
+
+            # 2. Sync Pi clock to current VM UTC timestamp (DO NOT restart docker container!)
+            current_utc = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(vm_epoch))
+            sync_cmd = (
+                f"ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no turtlebot@{host} "
+                f"\"sudo date -u -s '{current_utc}'\""
+            )
+            sync_res = subprocess.run(["bash", "-c", sync_cmd], capture_output=True, text=True, timeout=10.0)
+            if sync_res.returncode == 0:
+                # Re-verify skew after setting clock
+                verify_res = subprocess.run(check_cmd, capture_output=True, text=True, timeout=5.0)
+                if verify_res.returncode == 0:
+                    new_skew = abs(time.time() - float(verify_res.stdout.strip()))
+                    if new_skew <= max_skew_sec:
+                        self.logger.info(
+                            f"Successfully synchronized Raspberry Pi clock with VM! (new skew: {new_skew:.3f}s, was {skew:.1f}s)"
+                        )
+                        self._last_clock_sync_at = now
+                        return True
+                    else:
+                        self.logger.warn(
+                            f"Clock set succeeded but skew remains {new_skew:.3f}s > {max_skew_sec:.2f}s threshold. Ensure chrony is active."
+                        )
+                        return False
+                self._last_clock_sync_at = now
+                return True
+            else:
+                self.logger.warn(f"Failed to set clock on {host}: {sync_res.stderr.strip()}")
+                return False
+        except subprocess.TimeoutExpired:
+            self.logger.warn(f"Clock synchronization with {host} timed out")
+            return False
+        except Exception as exc:
+            self.logger.warn(f"Clock synchronization exception: {exc}")
+            return False
+
+    def _cleanup_stale_nav2_processes(self):
+        """Kill orphaned Nav2/Cartographer processes from previous bridge sessions.
+
+        Called before launching a new mapping stack to prevent stale TF state
+        and dual /map publishers causing corrupt transforms and goal rejections.
+        """
+        targets = (
+            "cartographer_node",
+            "cartographer_occupancy_grid_node",
+            "controller_server",
+            "planner_server",
+            "behavior_server",
+            "bt_navigator",
+            "waypoint_follower",
+            "lifecycle_manager_navigation",
+        )
+        pattern = "|".join(targets)
+        try:
+            subprocess.run(
+                ["bash", "-c", f"pkill -9 -f '{pattern}' 2>/dev/null; true"],
+                timeout=5.0,
+                capture_output=True,
+            )
+            self.logger.info("Cleaned up stale Nav2/Cartographer processes (if any)")
+        except Exception as exc:
+            self.logger.warn(f"Stale process cleanup warning: {exc}")
 
     # --------------------------------------------------------------------------
     # Nav2 NavigateToPose Action Handlers
@@ -839,6 +1335,13 @@ class TurtleBotBridgeNode:
             self.current_goal_handle = None
 
         goal_msg = NavigateToPose.Goal()
+        # Use the configured custom Behavior Tree matching the nav2 YAML configuration
+        custom_bt_xml = os.path.expanduser("~/turtlebot3_ws/config/navigate_to_pose_burger.xml")
+        if os.path.isfile(custom_bt_xml):
+            goal_msg.behavior_tree = custom_bt_xml
+            self.logger.info(f"Using custom Nav2 Behavior Tree: {custom_bt_xml}")
+        else:
+            self.logger.info("Using default YAML-configured Nav2 Behavior Tree")
         goal_msg.pose.header.frame_id = "map"
         # Zero timestamp tells tf2 in Nav2 to use the latest available transform, preventing clock-skew aborts
         try:
@@ -908,6 +1411,92 @@ class TurtleBotBridgeNode:
 
         self._broadcast_nav_status("PLANNING", detail)
 
+    async def plan_goal_async(self, x: float, y: float, yaw: float):
+        """Compute path to goal without moving the robot, broadcasting READY preview."""
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._plan_goal_blocking, float(x), float(y), float(yaw))
+
+    def _plan_goal_blocking(self, x: float, y: float, yaw: float):
+        m = self.virtual_boundary.get("safety_margin", 0.08)
+        if not self.is_point_inside_boundary(x, y, margin=m):
+            self.logger.warn(f"plan_goal rejected: target ({x:.2f}, {y:.2f}) is outside tabletop boundary")
+            self.broadcast({
+                "type": "nav_plan",
+                "navigation": {
+                    "path": [],
+                    "frame_id": "map",
+                    "status": "REJECTED_OUTSIDE_BOUNDARY",
+                    "goal": {"x": x, "y": y, "yaw": yaw},
+                }
+            })
+            return
+
+        if not HAS_NAV2 or getattr(self, "plan_client", None) is None:
+            self.logger.debug("ComputePathToPose ActionClient not available; cannot pre-plan")
+            return
+
+        if not self.plan_client.wait_for_server(timeout_sec=2.0):
+            self.logger.debug("/compute_path_to_pose action server not ready")
+            return
+
+        try:
+            goal_msg = ComputePathToPose.Goal()
+            goal_msg.pose = PoseStamped()
+            if hasattr(self, "node") and hasattr(self.node, "get_clock"):
+                goal_msg.pose.header.stamp = self.node.get_clock().now().to_msg()
+            goal_msg.pose.header.frame_id = "map"
+            goal_msg.pose.pose.position.x = float(x)
+            goal_msg.pose.pose.position.y = float(y)
+            goal_msg.pose.pose.position.z = 0.0
+            half_yaw = yaw / 2.0
+            goal_msg.pose.pose.orientation.x = 0.0
+            goal_msg.pose.pose.orientation.y = 0.0
+            goal_msg.pose.pose.orientation.z = math.sin(half_yaw)
+            goal_msg.pose.pose.orientation.w = math.cos(half_yaw)
+            goal_msg.planner_id = "GridBased"
+            goal_msg.use_start = False
+
+            self.logger.info(f"Computing route to goal ({x:.2f}, {y:.2f}) via /compute_path_to_pose...")
+            send_goal_future = self.plan_client.send_goal_async(goal_msg)
+            start_t = time.time()
+            while not send_goal_future.done() and (time.time() - start_t) < 3.0:
+                time.sleep(0.05)
+
+            if not send_goal_future.done():
+                self.logger.warn("ComputePathToPose send_goal timed out")
+                return
+
+            goal_handle = send_goal_future.result()
+            if not goal_handle.accepted:
+                self.logger.warn("ComputePathToPose goal was rejected by planner_server")
+                return
+
+            get_result_future = goal_handle.get_result_async()
+            start_t = time.time()
+            while not get_result_future.done() and (time.time() - start_t) < 4.0:
+                time.sleep(0.05)
+
+            if not get_result_future.done():
+                self.logger.warn("ComputePathToPose get_result timed out")
+                return
+
+            result_obj = get_result_future.result()
+            if result_obj and hasattr(result_obj, "result") and hasattr(result_obj.result, "path"):
+                path_poses = result_obj.result.path.poses
+                path_points = [{"x": float(p.pose.position.x), "y": float(p.pose.position.y)} for p in path_poses]
+                self.logger.info(f"Planned route successfully computed with {len(path_points)} waypoints")
+                self.broadcast({
+                    "type": "nav_plan",
+                    "navigation": {
+                        "path": path_points,
+                        "frame_id": "map",
+                        "status": "READY",
+                        "goal": {"x": x, "y": y, "yaw": yaw},
+                    }
+                })
+        except Exception as exc:
+            self.logger.warn(f"Exception during ComputePathToPose: {exc}")
+
     async def navigate_to_goal_async(self, x: float, y: float, yaw: float):
         """Serialize navigation requests while keeping blocking ROS waits off the event loop."""
         async with self._nav_lock:
@@ -944,6 +1533,14 @@ class TurtleBotBridgeNode:
             self.logger.warn("NavigateToPose rejected: operator session is not armed")
             self._broadcast_nav_status("FAILED", "Operator session is not armed")
             return
+
+        if self.virtual_boundary.get("enabled"):
+            b = self.virtual_boundary
+            m = b.get("safety_margin", 0.08)
+            if not self.is_point_inside_boundary(x, y, margin=m):
+                self.logger.warn(f"NavigateToPose rejected: target ({x:.2f}, {y:.2f}) is outside tabletop boundary safe zone")
+                self._broadcast_nav_status("FAILED", "Target rejected: outside tabletop virtual boundary")
+                return
 
         with self._nav_state_lock:
             safety_locked = self._nav_safety_lock_record is not None
@@ -997,6 +1594,15 @@ class TurtleBotBridgeNode:
             self.logger.warn("NavigateToPose aborted: operator session ended during server wait")
             self._release_ownership(MOTION_NAVIGATION)
             return
+
+        # Ensure bt_navigator has reached 'active' lifecycle state.
+        # Without this, wait_for_server() succeeds but goals are rejected.
+        if not self._nav2_confirmed_active:
+            if not self._wait_for_nav2_lifecycle_active(timeout_sec=20.0):
+                self.logger.error("Nav2 bt_navigator is not active; cannot navigate")
+                self._release_ownership(MOTION_NAVIGATION)
+                self._broadcast_nav_status("FAILED", "Nav2 is still initializing -- try again in a few seconds")
+                return
 
         # A prior Nav2 goal must be terminal before this new goal is dispatched.
         if existing_record is not None and not existing_record.result_event.is_set():
@@ -1069,6 +1675,8 @@ class TurtleBotBridgeNode:
             superseded = not current or record.cancel_requested
 
         if not goal_handle.accepted:
+            # Reset lifecycle flag so next attempt re-checks bt_navigator state
+            self._nav2_confirmed_active = False
             with self._nav_state_lock:
                 record.result_status = None
                 if self._nav_cancel_record is record:
@@ -1531,27 +2139,46 @@ class TurtleBotBridgeNode:
         # If an external mapping/navigation launch is already active, reuse it.
         try:
             if nav_client.wait_for_server(timeout_sec=0.5):
+                if not self._nav2_confirmed_active:
+                    self._wait_for_nav2_lifecycle_active(timeout_sec=min(timeout_sec, 20.0))
                 return True
         except Exception:
             pass
 
         # Before spawning a new subprocess, check if Cartographer/Nav2 nodes
-        # already exist in the ROS graph. The action server may take 8-15s to
-        # initialize, during which wait_for_server returns False even though the
-        # stack is already launching. Spawning a second instance causes dual
-        # /map publishers (double boundary) and conflicting TF transforms.
+        # already exist in the ROS graph. If our own process started them, wait
+        # for the action server. If they are orphans from a previous bridge
+        # session, kill them — they carry stale TF state that causes Nav2 to
+        # reject every goal.
         try:
             known_mapping_nodes = {
                 'cartographer_node', 'cartographer_occupancy_grid_node',
                 'controller_server', 'bt_navigator', 'planner_server',
             }
             active_names = {n[0].lstrip('/') for n in self.node.get_node_names_and_namespaces()}
-            if known_mapping_nodes.intersection(active_names):
-                self.logger.info(
-                    f"Mapping/Nav2 nodes already in ROS graph ({known_mapping_nodes.intersection(active_names)}); "
-                    f"waiting for action server instead of launching a new stack"
+            stale_nodes = known_mapping_nodes.intersection(active_names)
+            if stale_nodes:
+                our_process_alive = (
+                    self.mapping_process_started_by_bridge
+                    and self.mapping_process is not None
+                    and self.mapping_process.poll() is None
                 )
-                return nav_client.wait_for_server(timeout_sec=min(timeout_sec, 20.0))
+                if our_process_alive:
+                    self.logger.info(
+                        f"Mapping/Nav2 nodes from our process in ROS graph ({stale_nodes}); "
+                        f"waiting for action server"
+                    )
+                    server_ok = nav_client.wait_for_server(timeout_sec=min(timeout_sec, 20.0))
+                    if server_ok and not self._nav2_confirmed_active:
+                        self._wait_for_nav2_lifecycle_active(timeout_sec=min(timeout_sec, 30.0))
+                    return server_ok
+                else:
+                    self.logger.warn(
+                        f"Found ORPHANED Nav2/Cartographer nodes ({stale_nodes}) from a "
+                        f"previous session; killing them to prevent stale TF state"
+                    )
+                    self._cleanup_stale_nav2_processes()
+                    time.sleep(3.0)  # Let processes die and ROS graph settle
         except Exception as exc:
             self.logger.warn(f"ROS graph check failed (non-fatal): {exc}")
 
@@ -1562,6 +2189,9 @@ class TurtleBotBridgeNode:
         process = getattr(self, "mapping_process", None)
         if process is not None and process.poll() is None:
             return nav_client.wait_for_server(timeout_sec=min(timeout_sec, 20.0))
+
+        # Ensure robot clock is aligned before launching Cartographer / Nav2
+        self._sync_robot_clock()
 
         cmd = f"source {ENV_SCRIPT_PATH} && ros2 launch {MAPPING_NAV_LAUNCH_PATH}"
         try:
@@ -1588,6 +2218,10 @@ class TurtleBotBridgeNode:
                 return False
             try:
                 if nav_client.wait_for_server(timeout_sec=0.5):
+                    # Action server exists but bt_navigator may still be inactive.
+                    # Wait for lifecycle activation before declaring ready.
+                    remaining = max(5.0, deadline - time.monotonic())
+                    self._wait_for_nav2_lifecycle_active(timeout_sec=remaining)
                     return True
             except Exception:
                 pass
@@ -1907,15 +2541,34 @@ class TurtleBotBridgeNode:
         )
         return False
 
+    def _stop_motion_burst(self, count=5, interval=0.05):
+        """Publish zero-velocity burst in background to override lingering controller/behavior outputs."""
+        def _burst():
+            msg = Twist()
+            msg.linear.x = 0.0
+            msg.angular.z = 0.0
+            for _ in range(count):
+                time.sleep(interval)
+                with self._motion_owner_lock:
+                    if self.motion_owner in (MOTION_NAVIGATION, MOTION_EXPLORATION):
+                        # A new autonomous goal has taken ownership; abort zero burst immediately
+                        break
+                try:
+                    if self.cmd_vel_pub is not None:
+                        self.cmd_vel_pub.publish(msg)
+                except Exception:
+                    pass
+        threading.Thread(target=_burst, name="zero-stop-burst", daemon=True).start()
+
     def _release_navigation_with_zero(self):
         """Atomically zero and release NAVIGATION so a fresh owner cannot interleave between them."""
         with self._motion_owner_lock:
-            if self.motion_owner != MOTION_NAVIGATION:
-                return False
             self._publish_zero_locked()
-            self.motion_owner = MOTION_NONE
-            self.logger.info("Motion ownership released by: NAVIGATION")
-            return True
+            if self.motion_owner == MOTION_NAVIGATION:
+                self.motion_owner = MOTION_NONE
+                self.logger.info("Motion ownership released by: NAVIGATION")
+        self._stop_motion_burst()
+        return True
 
     def _release_ownership(self, owner: str):
         with self._motion_owner_lock:
@@ -1942,7 +2595,11 @@ class TurtleBotBridgeNode:
         msg = Twist()
         msg.linear.x = 0.0
         msg.angular.z = 0.0
-        self.cmd_vel_pub.publish(msg)
+        try:
+            if self.cmd_vel_pub is not None:
+                self.cmd_vel_pub.publish(msg)
+        except Exception:
+            pass
 
     def publish_velocity(
         self,
@@ -1963,6 +2620,15 @@ class TurtleBotBridgeNode:
             return
 
         is_zero = linear == 0.0 and angular == 0.0
+
+        with self._motion_owner_lock:
+            if self.motion_owner in (MOTION_NAVIGATION, MOTION_EXPLORATION):
+                # Autonomous operation owns motion -- browser manual cmd_vel (zero or non-zero)
+                # must not interrupt or inject zeroes into the physical control stream.
+                if not is_zero:
+                    self.logger.warn(f"Manual cmd_vel rejected: {self.motion_owner} owns motion")
+                return
+
         if is_zero:
             # Manual stop must be one atomic transition. Otherwise a fresh non-zero command
             # could be accepted between publishing zero and releasing MANUAL ownership.
@@ -2012,6 +2678,20 @@ class TurtleBotBridgeNode:
                 return
 
             self._last_manual_command_at = time.monotonic()
+            if self.virtual_boundary.get("enabled") and linear != 0.0:
+                pose = self._get_latest_map_pose()
+                if pose is not None:
+                    rx = pose["position"]["x"]
+                    ry = pose["position"]["y"]
+                    yaw = pose.get("yaw_rad", 0.0)
+                    b = self.virtual_boundary
+                    m = float(b.get("safety_margin", 0.06))
+                    dt = 0.2
+                    next_x = rx + linear * math.cos(yaw) * dt
+                    next_y = ry + linear * math.sin(yaw) * dt
+                    if not self.is_step_safe(rx, ry, next_x, next_y, margin=m):
+                        linear = 0.0
+
             self.last_cmd_vel = {"linear": linear, "angular": angular}
             msg = Twist()
             msg.linear.x = float(linear)
@@ -2579,6 +3259,8 @@ class WebSocketBridgeServer:
                 }
                 if self.bridge_node._latest_map_payload is not None:
                     init_payload["map"] = self.bridge_node._latest_map_payload["map"]
+                if hasattr(self.bridge_node, "virtual_boundary") and self.bridge_node.virtual_boundary:
+                    init_payload["boundary"] = self.bridge_node.virtual_boundary
                 await websocket.send(json.dumps(init_payload))
 
                 # Proactively ensure Cartographer + Nav2 stack is running for real-time map retrieval across modes
@@ -2669,6 +3351,44 @@ class WebSocketBridgeServer:
         elif msg_type == "explore_stop":
             self.bridge_node.stop_exploration()
 
+        elif msg_type == "plan_goal":
+            x = _parse_finite_number(data.get("x"))
+            y = _parse_finite_number(data.get("y"))
+            yaw = _parse_finite_number(data.get("yaw"))
+            if x is not None and y is not None:
+                if yaw is None:
+                    yaw = 0.0
+                asyncio.create_task(self.bridge_node.plan_goal_async(x, y, yaw))
+
+        elif msg_type == "set_virtual_boundary":
+            enabled = bool(data.get("enabled", False))
+            min_x = _parse_finite_number(data.get("min_x"))
+            max_x = _parse_finite_number(data.get("max_x"))
+            min_y = _parse_finite_number(data.get("min_y"))
+            max_y = _parse_finite_number(data.get("max_y"))
+            margin = _parse_finite_number(data.get("safety_margin"))
+            rot_deg = _parse_finite_number(data.get("rotation_deg"))
+            if rot_deg is None:
+                rot_deg = _parse_finite_number(data.get("rotationDeg"))
+            if rot_deg is None:
+                rot_deg = 0.0
+            if min_x is not None and max_x is not None and min_y is not None and max_y is not None:
+                self.bridge_node.virtual_boundary = {
+                    "enabled": enabled,
+                    "min_x": min(min_x, max_x),
+                    "max_x": max(min_x, max_x),
+                    "min_y": min(min_y, max_y),
+                    "max_y": max(min_y, max_y),
+                    "safety_margin": max(0.04, margin if margin is not None else 0.08),
+                    "rotation_deg": rot_deg,
+                }
+                self.bridge_node._save_virtual_boundary()
+                self.bridge_node._publish_tabletop_boundary()
+                self.bridge_node.broadcast({
+                    "type": "virtual_boundary",
+                    "boundary": self.bridge_node.virtual_boundary,
+                })
+
         elif msg_type == "clear_map":
             self.bridge_node.clear_map_data()
 
@@ -2758,12 +3478,24 @@ def main():
         shutdown_ok = False
         try:
             shutdown_ok = bridge_node.shutdown_blocking(timeout_sec=10.0)
+        except Exception as exc:
+            print(f"[SHUTDOWN] Note during shutdown_blocking: {exc}")
         finally:
-            bridge_node.node.destroy_node()
-            rclpy.shutdown()
+            try:
+                bridge_node.node.destroy_node()
+            except Exception:
+                pass
+            try:
+                if rclpy.ok():
+                    rclpy.shutdown()
+            except Exception:
+                pass
             if ros_thread.is_alive():
                 ros_thread.join(timeout=2.0)
-            loop.close()
+            try:
+                loop.close()
+            except Exception:
+                pass
             if shutdown_ok:
                 print("[SHUTDOWN] Bridge stopped cleanly: tracked motion sources terminated.")
             else:

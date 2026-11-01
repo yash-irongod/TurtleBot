@@ -1,0 +1,51 @@
+<!--
+  Nav2 Behavior Tree for TurtleBot3 Burger:
+  True Commit-to-Path Navigation.
+
+  Architecture:
+  1. ComputePathToPose runs ONCE when goal is received.
+  2. FollowPath tracks the committed path WITHOUT periodic replanning.
+  3. Replan ONLY when the controller reports FAILURE (genuinely blocked).
+  4. Recovery: clear local costmap and replan. If still fails, outer recovery
+     clears both costmaps and the Sequence restarts with a fresh plan.
+  5. No RateController, no IsPathValid, no PipelineSequence re-ticking.
+     This completely eliminates route-switching oscillation between two
+     equally-valid paths around an obstacle.
+  6. Tabletop safe: No blind Spin or BackUp behaviors.
+-->
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+      <!--
+        Plain Sequence (NOT PipelineSequence):
+        - Child 1 (ComputePathToPose) runs once, returns SUCCESS, never re-ticked.
+        - Child 2 (FollowPath) runs until goal reached or failure.
+        - On outer recovery retry, Sequence resets: fresh ComputePathToPose.
+      -->
+      <Sequence name="NavigateSequence">
+        <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+        <RecoveryNode number_of_retries="2" name="FollowPathRecovery">
+          <FollowPath path="{path}" controller_id="FollowPath"/>
+          <Sequence name="LocalClearAndReplan">
+            <ClearEntireCostmap name="ClearLocalCostmap"
+              service_name="local_costmap/clear_entirely_local_costmap"/>
+            <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+          </Sequence>
+        </RecoveryNode>
+      </Sequence>
+      <!-- Top-level recovery: full costmap clear, then Sequence restarts with fresh plan -->
+      <ReactiveFallback name="FallbackRecoveries">
+        <GoalUpdated/>
+        <RoundRobin name="RecoveryActions">
+          <Sequence name="FullClearRecovery">
+            <ClearEntireCostmap name="ClearLocalCostmap-Full"
+              service_name="local_costmap/clear_entirely_local_costmap"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Full"
+              service_name="global_costmap/clear_entirely_global_costmap"/>
+          </Sequence>
+          <Wait name="WaitRecovery" wait_duration="2"/>
+        </RoundRobin>
+      </ReactiveFallback>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

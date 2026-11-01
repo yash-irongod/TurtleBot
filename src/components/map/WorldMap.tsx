@@ -1,6 +1,6 @@
 import clsx from 'clsx'
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type PointerEvent } from 'react'
-import { Radar, RotateCcw } from 'lucide-react'
+import { Focus, Radar, RotateCcw } from 'lucide-react'
 import { useRobot } from '../../context/RobotContext'
 import { demoOccupancyGrid } from '../../data/mapGrid'
 import { fixed } from '../../lib/format'
@@ -8,6 +8,9 @@ import { extractMapGeometry } from '../../lib/mapGeometry'
 import { GlassPanel } from '../common/GlassPanel'
 import { MicroLabel } from '../common/MicroLabel'
 import { RobotGlyph } from '../robot/RobotGlyph'
+import { createSmoothKinematics } from '../drive3d/smoothKinematics'
+import { VirtualBoundaryControls } from './VirtualBoundaryControls'
+import { VirtualBoundaryOverlay } from './VirtualBoundaryOverlay'
 import type { DataEnvironment, NavigationState, OccupancyGrid, Position2D } from '../../types/robot'
 
 const CELL_PX = 10
@@ -61,8 +64,8 @@ function worldToPx(pos: Position2D, grid: OccupancyGrid) {
 }
 
 /** Converts a screen pointer to the centre of a valid occupancy-grid cell. */
-function screenToGridPosition(svg: SVGSVGElement, clientX: number, clientY: number, grid: OccupancyGrid): Position2D | null {
-  const matrix = svg.getScreenCTM()
+function screenToGridPosition(element: SVGGraphicsElement, clientX: number, clientY: number, grid: OccupancyGrid): Position2D | null {
+  const matrix = element.getScreenCTM()
   if (!matrix) return null
 
   const point = new DOMPoint(clientX, clientY).matrixTransform(matrix.inverse())
@@ -238,6 +241,7 @@ export function WorldMap({ compact = false, variant = 'standard', className, onT
   const isCompact = compact || isMinimap
   const {
     telemetry,
+    getLatestTelemetry,
     navigation,
     environment,
     canEditMapGoal,
@@ -249,11 +253,17 @@ export function WorldMap({ compact = false, variant = 'standard', className, onT
     refreshMap,
     mappingStatus,
     autoNavigateOnClick,
+    virtualBoundary,
+    isEditingBoundary,
   } = useRobot()
   const isLive = sourceStatus === 'LIVE'
   const isAwaitingLiveMap = isLive && !liveOccupancyGrid
   const emptyLiveGrid = useMemo(() => createEmptyOccupancyGrid(), [])
   const grid = isLive && !liveOccupancyGrid ? emptyLiveGrid : (liveOccupancyGrid ?? demoOccupancyGrid)
+  const gridRef = useRef(grid)
+
+  gridRef.current = grid
+
   const mapGeometry = useMemo(
     () => (isLive && liveOccupancyGrid ? extractMapGeometry(liveOccupancyGrid) : { boundaryPolylines: [], boundarySegments: [], obstacles: [] }),
     [isLive, liveOccupancyGrid],
@@ -270,10 +280,48 @@ export function WorldMap({ compact = false, variant = 'standard', className, onT
   const [draftGoal, setDraftGoal] = useState<Position2D | null>(null)
   const [draggingGoal, setDraggingGoal] = useState(false)
   const [goalEditNotice, setGoalEditNotice] = useState<string | null>(null)
+  const [tableFocusEnabled, setTableFocusEnabled] = useState(true)
 
   const viewW = grid.widthCells * CELL_PX
   const viewH = grid.heightCells * CELL_PX
-  const robotPx = worldToPx(telemetry.odometry.position, grid)
+
+  const defaultViewBox = `0 0 ${viewW} ${viewH}`
+  const canFocusTable = virtualBoundary.enabled && !isEditingBoundary && viewW > 0 && viewH > 0
+  const isTableFocused = canFocusTable && tableFocusEnabled
+
+  const contentGroupRef = useRef<SVGGElement | null>(null)
+  const robotGroupRef = useRef<SVGGElement | null>(null)
+  const robotHeadingRef = useRef<SVGGElement | null>(null)
+
+  const activeViewBox = useMemo(() => {
+    if (!isTableFocused) return defaultViewBox
+    const p1 = worldToPx({ x: virtualBoundary.minX, y: virtualBoundary.minY }, grid)
+    const p2 = worldToPx({ x: virtualBoundary.maxX, y: virtualBoundary.maxY }, grid)
+    const cx = (p1.x + p2.x) / 2
+    const cy = (p1.y + p2.y) / 2
+    const spanW = Math.max(10, Math.abs(p2.x - p1.x))
+    const spanH = Math.max(10, Math.abs(p2.y - p1.y))
+
+    // 16% padding around table edges so borders, dimensions, and edge clearance are visible
+    const padX = Math.max(20, spanW * 0.16)
+    const padY = Math.max(20, spanH * 0.16)
+    const x = Math.max(0, cx - spanW / 2 - padX)
+    const y = Math.max(0, cy - spanH / 2 - padY)
+    const w = Math.min(viewW - x, spanW + 2 * padX)
+    const h = Math.min(viewH - y, spanH + 2 * padY)
+    return `${x.toFixed(1)} ${y.toFixed(1)} ${w.toFixed(1)} ${h.toFixed(1)}`
+  }, [defaultViewBox, grid, isTableFocused, viewH, viewW, virtualBoundary.maxX, virtualBoundary.maxY, virtualBoundary.minX, virtualBoundary.minY])
+
+  const contentTransform = useMemo(() => {
+    if (!isTableFocused) return undefined
+    const rot = virtualBoundary.rotationDeg ?? 0
+    if (rot === 0) return undefined
+    const p1 = worldToPx({ x: virtualBoundary.minX, y: virtualBoundary.minY }, grid)
+    const p2 = worldToPx({ x: virtualBoundary.maxX, y: virtualBoundary.maxY }, grid)
+    const cx = (p1.x + p2.x) / 2
+    const cy = (p1.y + p2.y) / 2
+    return `rotate(${-rot} ${cx.toFixed(1)} ${cy.toFixed(1)})`
+  }, [isTableFocused, virtualBoundary.rotationDeg, virtualBoundary.minX, virtualBoundary.minY, virtualBoundary.maxX, virtualBoundary.maxY, grid])
   const displayedGoalPosition = draftGoal ?? navigation.goal?.position ?? null
   const goalPx = displayedGoalPosition ? worldToPx(displayedGoalPosition, grid) : null
   const frontierPx = exploration?.selectedFrontier ? worldToPx(exploration.selectedFrontier, grid) : null
@@ -288,10 +336,43 @@ export function WorldMap({ compact = false, variant = 'standard', className, onT
     [],
   )
 
+  // ── RAF-based smooth robot animation (60fps, bypasses React state) ──
+  useEffect(() => {
+    const initOdom = getLatestTelemetry().odometry
+    const kinematics = createSmoothKinematics(initOdom)
+    let animId = 0
+    let lastTime = performance.now()
+
+    const loop = (now: number) => {
+      animId = requestAnimationFrame(loop)
+      const dt = Math.min(0.064, Math.max(0.001, (now - lastTime) / 1000))
+      lastTime = now
+
+      const latestTelemetry = getLatestTelemetry()
+      const rawOdom = latestTelemetry.odometry
+      const kPose = kinematics.update(dt, rawOdom, { isLiveMode: isLive })
+
+      // Convert smoothed world position to pixel coords
+      const px = ((kPose.position.x - gridRef.current.origin.x) / gridRef.current.resolutionM) * CELL_PX
+      const py = ((kPose.position.y - gridRef.current.origin.y) / gridRef.current.resolutionM) * CELL_PX
+
+      // Direct DOM update — no React re-render
+      if (robotGroupRef.current) {
+        robotGroupRef.current.setAttribute('transform', `translate(${px} ${py})`)
+      }
+      if (robotHeadingRef.current) {
+        robotHeadingRef.current.setAttribute('transform', `rotate(${kPose.headingDeg}) translate(-13 -13)`)
+      }
+    }
+
+    animId = requestAnimationFrame(loop)
+    return () => cancelAnimationFrame(animId)
+  }, [getLatestTelemetry, isLive])
+
   const mapPositionFromClient = useCallback(
     (clientX: number, clientY: number) => {
-      const svg = svgRef.current
-      return svg ? screenToGridPosition(svg, clientX, clientY, grid) : null
+      const target = contentGroupRef.current ?? svgRef.current
+      return target ? screenToGridPosition(target, clientX, clientY, grid) : null
     },
     [grid],
   )
@@ -314,7 +395,7 @@ export function WorldMap({ compact = false, variant = 'standard', className, onT
 
   const handleMapClick = useCallback(
     (event: MouseEvent<SVGSVGElement>) => {
-      if (!canEditMapGoal) return
+      if (!canEditMapGoal || isEditingBoundary) return
       const position = mapPositionFromClient(event.clientX, event.clientY)
       if (!position) return
 
@@ -324,18 +405,34 @@ export function WorldMap({ compact = false, variant = 'standard', className, onT
         return
       }
 
-      setGoalEditNotice(
-        resolved.snapped
-          ? 'Target adjusted to open space.'
-          : autoNavigateOnClick
-            ? 'Target assigned — starting navigation route.'
-            : isLive
-              ? 'Live target set — press Start to run route.'
-              : 'Demo target set — press Start to run route.',
-      )
+      let notice = resolved.snapped
+        ? 'Target adjusted to open space.'
+        : autoNavigateOnClick
+          ? 'Target assigned — starting navigation route.'
+          : isLive
+            ? 'Live target set — press Start to run route.'
+            : 'Demo target set — press Start to run route.'
+
+      if (virtualBoundary.enabled) {
+        const m = virtualBoundary.safetyMarginM ?? 0.12
+        const minX = virtualBoundary.minX + m
+        const maxX = virtualBoundary.maxX - m
+        const minY = virtualBoundary.minY + m
+        const maxY = virtualBoundary.maxY - m
+        if (
+          resolved.position.x < minX ||
+          resolved.position.x > maxX ||
+          resolved.position.y < minY ||
+          resolved.position.y > maxY
+        ) {
+          notice = 'Target clamped inside tabletop safe boundary.'
+        }
+      }
+
+      setGoalEditNotice(notice)
       setGoalAt(resolved.position, autoNavigateOnClick)
     },
-    [canEditMapGoal, grid, mapPositionFromClient, setGoalAt, showInvalidGoalNotice, isLive, autoNavigateOnClick],
+    [canEditMapGoal, isEditingBoundary, grid, mapPositionFromClient, setGoalAt, showInvalidGoalNotice, isLive, autoNavigateOnClick, virtualBoundary],
   )
 
   const handleGoalPointerDown = useCallback(
@@ -399,18 +496,34 @@ export function WorldMap({ compact = false, variant = 'standard', className, onT
         return
       }
 
-      setGoalEditNotice(
-        resolved.snapped
-          ? 'Target adjusted to nearest open space.'
-          : autoNavigateOnClick
-            ? 'Target assigned — starting navigation route.'
-            : isLive
-              ? 'Live target repositioned — press Start to run route.'
-              : 'Demo target repositioned — press Start to run route.',
-      )
+      let notice = resolved.snapped
+        ? 'Target adjusted to nearest open space.'
+        : autoNavigateOnClick
+          ? 'Target assigned — starting navigation route.'
+          : isLive
+            ? 'Live target repositioned — press Start to run route.'
+            : 'Demo target repositioned — press Start to run route.'
+
+      if (virtualBoundary.enabled) {
+        const m = virtualBoundary.safetyMarginM ?? 0.12
+        const minX = virtualBoundary.minX + m
+        const maxX = virtualBoundary.maxX - m
+        const minY = virtualBoundary.minY + m
+        const maxY = virtualBoundary.maxY - m
+        if (
+          resolved.position.x < minX ||
+          resolved.position.x > maxX ||
+          resolved.position.y < minY ||
+          resolved.position.y > maxY
+        ) {
+          notice = 'Target clamped inside tabletop safe boundary.'
+        }
+      }
+
+      setGoalEditNotice(notice)
       setGoalAt(resolved.position, autoNavigateOnClick)
     },
-    [grid, mapPositionFromClient, setGoalAt, isLive, autoNavigateOnClick],
+    [grid, mapPositionFromClient, setGoalAt, isLive, autoNavigateOnClick, virtualBoundary],
   )
 
   const handleGoalKeyDown = useCallback(
@@ -522,11 +635,13 @@ export function WorldMap({ compact = false, variant = 'standard', className, onT
 
   const goalEditHint =
     goalEditNotice ??
-    (navigation.goal
-      ? 'Click a free cell to replace the target · drag the target to move it'
-      : isLive
-        ? 'Click a free cell to place a live target'
-        : 'Click a free cell to place a demo target')
+    (isEditingBoundary
+      ? 'Editing tabletop boundary · Drag handles or move center to adjust table edges'
+      : navigation.goal
+        ? 'Click a free cell to replace the target · drag the target to move it'
+        : isLive
+          ? 'Click a free cell to place a live target'
+          : 'Click a free cell to place a demo target')
 
   return (
     <GlassPanel
@@ -563,6 +678,22 @@ export function WorldMap({ compact = false, variant = 'standard', className, onT
             >
               <RotateCcw className="h-3 w-3" />
               <span className="hidden sm:inline">Refresh Map</span>
+            </button>
+          )}
+          {virtualBoundary.enabled && !isEditingBoundary && !isMinimap && (
+            <button
+              type="button"
+              onClick={() => setTableFocusEnabled((v) => !v)}
+              className={clsx(
+                'flex items-center gap-1 rounded-md border px-2 py-0.5 font-mono text-[9px] uppercase tracking-wider transition',
+                isTableFocused
+                  ? 'border-amber-400/50 bg-amber-500/20 text-amber-300 shadow-[0_0_10px_rgba(245,158,11,0.2)]'
+                  : 'border-white/[0.09] bg-white/[0.03] text-ink-400 hover:border-white/20 hover:text-ink-200'
+              )}
+              title={isTableFocused ? 'Switch to Full Map view' : 'Zoom in to Tabletop'}
+            >
+              <Focus className="h-3 w-3" />
+              <span>{isTableFocused ? 'Zoomed: Table' : 'Zoom: Full'}</span>
             </button>
           )}
           {isAwaitingLiveMap ? (
@@ -620,9 +751,13 @@ export function WorldMap({ compact = false, variant = 'standard', className, onT
         )}
         <svg
           ref={svgRef}
-          viewBox={`0 0 ${viewW} ${viewH}`}
+          viewBox={activeViewBox}
           preserveAspectRatio="xMidYMid meet"
-          className={clsx('h-full w-full', canEditMapGoal && 'cursor-crosshair')}
+          className={clsx(
+            'h-full w-full',
+            canEditMapGoal && !isEditingBoundary && 'cursor-crosshair',
+            isEditingBoundary && 'cursor-default',
+          )}
           role={canEditMapGoal ? 'group' : 'img'}
           aria-label={canEditMapGoal ? (isLive ? 'Interactive live occupancy map' : 'Interactive demo occupancy map') : undefined}
           aria-labelledby={canEditMapGoal ? undefined : titleId}
@@ -647,6 +782,7 @@ export function WorldMap({ compact = false, variant = 'standard', className, onT
           <rect x={0} y={0} width={viewW} height={viewH} className="fill-void-950" />
           <rect x={0} y={0} width={viewW} height={viewH} fill={`url(#${glowId})`} />
           <rect x={0} y={0} width={viewW} height={viewH} fill={`url(#${gridPatternId})`} />
+          <g ref={contentGroupRef} transform={contentTransform}>
           {mapImageUrl ? (
             <image
               href={mapImageUrl}
@@ -660,6 +796,16 @@ export function WorldMap({ compact = false, variant = 'standard', className, onT
           ) : (
             cellRects
           )}
+
+          {/* Virtual Boundary Overlay (tabletop hazard, edges, handles) */}
+          <VirtualBoundaryOverlay
+            grid={grid}
+            svgRef={svgRef}
+            cellPx={CELL_PX}
+            viewW={viewW}
+            viewH={viewH}
+            isTableFocused={isTableFocused}
+          />
 
           {isLive && mapGeometry.boundaryPolylines && mapGeometry.boundaryPolylines.length > 0 && (
             <g pointerEvents="none" aria-label="Detected live map boundary">
@@ -818,12 +964,13 @@ export function WorldMap({ compact = false, variant = 'standard', className, onT
             </g>
           )}
 
-          <g transform={`translate(${robotPx.x} ${robotPx.y})`} aria-label="Current robot position">
+          <g ref={robotGroupRef} transform="translate(0 0)" aria-label="Current robot position">
             <circle r={19} className="fill-signal-500/[0.10] stroke-signal-400/25" strokeWidth={1} />
             <circle r={13} className="fill-void-950/70" />
-            <g transform={`rotate(${telemetry.odometry.headingDeg}) translate(-13 -13)`}>
+            <g ref={robotHeadingRef} transform="rotate(0) translate(-13 -13)">
               <RobotGlyph size={26} />
             </g>
+          </g>
           </g>
         </svg>
 
@@ -848,6 +995,10 @@ export function WorldMap({ compact = false, variant = 'standard', className, onT
           </div>
         )}
       </div>
+
+      {!isMinimap && (
+        <VirtualBoundaryControls compact={isCompact} />
+      )}
 
       {canEditMapGoal && (
         <p id={goalInteractionHintId} className="sr-only" aria-live="polite">

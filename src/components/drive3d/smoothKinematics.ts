@@ -2,9 +2,7 @@ import type { OdometryState, Position2D } from '../../types/robot'
 
 export interface KinematicsContext {
   /**
-   * True only for LIVE mode where we dead-reckon between sparse 100ms ROS packets.
-   * In DEMO mode we also dead-reckon (50ms ticks → 20Hz updates) but use a slightly
-   * stronger correction when new odom arrives since mock data is authoritative.
+   * True for LIVE mode where we dead-reckon between 20Hz (50ms) ROS packets.
    */
   isLiveMode?: boolean
 }
@@ -36,19 +34,9 @@ export interface SmoothKinematicsIntegrator {
 }
 
 /**
- * Forza-Grade 60fps Motion Engine.
+ * 60fps Precision Motion Engine.
  *
  * Architecture: Unified dead-reckoning for BOTH DEMO and LIVE modes.
- *
- * Why dead-reckoning instead of position lerping:
- *   - DEMO mode: mock tick fires every 50ms (20Hz). Position lerping would produce
- *     20 visible steps per second. Dead-reckoning at 60fps produces 60 smooth steps
- *     per second. Since we integrate with the same dt*velocity formula that mockTelemetry
- *     uses, dead-reckoned position is MATHEMATICALLY IDENTICAL to what the next tick
- *     will report → zero correction needed at tick boundaries → seamless motion.
- *
- *   - LIVE mode: ROS odometry arrives at ~10Hz. Dead-reckoning at 60fps fills in
- *     the 6 frames between packets. Soft correction on each new ROS odom packet.
  *
  * Heading convention: 0 = North, clockwise positive (matches TurtleBot compass frame).
  * In mockTelemetry: headingDeg decreases when angular > 0 (CCW = left turn).
@@ -89,6 +77,12 @@ export function createSmoothKinematics(initialOdom: OdometryState): SmoothKinema
     // Cap dt: max 50ms prevents huge jumps when tab regains focus
     const dt = Math.max(0.001, Math.min(0.05, dtSec))
 
+    // Handle large teleports / map resets
+    const distToTarget = Math.hypot(targetOdom.position.x - posX, targetOdom.position.y - posY)
+    if (distToTarget > 1.0) {
+      snapTo(targetOdom)
+    }
+
     // ─────────────────────────────────────────────────────────────────────
     // 1. Velocity smoothing (fast low-pass, always runs)
     //    velLambda=12 → ~17% blend per 16ms frame → velocity tracks tightly
@@ -97,73 +91,65 @@ export function createSmoothKinematics(initialOdom: OdometryState): SmoothKinema
     linearVel += (targetOdom.linearVelocity - linearVel) * velBlend
     angularVel += (targetOdom.angularVelocity - angularVel) * velBlend
 
-    // ─────────────────────────────────────────────────────────────────────
-    // 2. Dead-Reckoning (runs every frame in BOTH modes)
-    //
-    //    Coordinate system:
-    //      map.x = East,  map.y = South (y increases southward)
-    //      scene.x = map.x,  scene.z = map.y
-    //      heading 0 = North → forward in map = (x=0, y=-1)
-    //      sin(headingRad) = x component of forward
-    //      -cos(headingRad) = y component of forward (y decreases = North)
-    //
-    //    Heading convention (same as mockTelemetry.stepOdometry):
-    //      positive angular = CCW (left turn) = headingDeg DECREASES
-    //      → headingRad decreases when angular > 0
-    //      → headingRad -= angularVel * dt
-    // ─────────────────────────────────────────────────────────────────────
-    const forwardX = Math.sin(headingRad)
-    const forwardY = -Math.cos(headingRad)
-    posX += forwardX * linearVel * dt
-    posY += forwardY * linearVel * dt
-    headingRad -= angularVel * dt
-
-    // ─────────────────────────────────────────────────────────────────────
-    // 3. Soft correction when new telemetry arrives
-    //
-    //    odomChanged detects a new tick from the data source.
-    //    At DEMO 50ms ticks: dead-reckoned pos ≈ actual (same formula),
-    //    so correction magnitude is near-zero → seamless.
-    //    At LIVE 100ms ROS packets: correction compensates for any IMU drift.
-    //
-    //    isLiveMode uses gentler correction (lambda=3) since ROS odom may
-    //    have small noise. DEMO uses lambda=4 (stronger, but still gentle).
-    // ─────────────────────────────────────────────────────────────────────
     const isLive = ctx?.isLiveMode ?? false
-    const odomChanged =
-      targetOdom.position.x !== lastOdomX ||
-      targetOdom.position.y !== lastOdomY
 
-    if (odomChanged) {
-      lastOdomX = targetOdom.position.x
-      lastOdomY = targetOdom.position.y
+    if (isLive) {
+      // ─────────────────────────────────────────────────────────────────────
+      // LIVE Mode: Directly & smoothly converge to authoritative 20 Hz SLAM pose.
+      // Eliminates open-loop velocity integration drift, jitter, and spinning.
+      // Rate lambda = 18.0 provides ~25% blend per 16ms frame (smooth, responsive).
+      // ─────────────────────────────────────────────────────────────────────
+      const posBlend = 1 - Math.exp(-18.0 * dt)
+      posX += (targetOdom.position.x - posX) * posBlend
+      posY += (targetOdom.position.y - posY) * posBlend
 
-      const corrLambda = isLive ? 3.0 : 4.0
-      const corrBlend = 1 - Math.exp(-corrLambda * dt)
-      posX += (targetOdom.position.x - posX) * corrBlend
-      posY += (targetOdom.position.y - posY) * corrBlend
+      const targetHeadingRad = (targetOdom.headingDeg * Math.PI) / 180
+      const angErr = Math.atan2(
+        Math.sin(targetHeadingRad - headingRad),
+        Math.cos(targetHeadingRad - headingRad),
+      )
+      const angBlend = 1 - Math.exp(-18.0 * dt)
+      headingRad += angErr * angBlend
+      headingRad = Math.atan2(Math.sin(headingRad), Math.cos(headingRad))
+    } else {
+      // ─────────────────────────────────────────────────────────────────────
+      // DEMO Mode: Dead-Reckoning from simulated velocities.
+      // ─────────────────────────────────────────────────────────────────────
+      const forwardX = Math.sin(headingRad)
+      const forwardY = -Math.cos(headingRad)
+      posX += forwardX * linearVel * dt
+      posY += forwardY * linearVel * dt
+      headingRad -= angularVel * dt
+
+      const odomChanged =
+        targetOdom.position.x !== lastOdomX ||
+        targetOdom.position.y !== lastOdomY
+
+      if (odomChanged) {
+        lastOdomX = targetOdom.position.x
+        lastOdomY = targetOdom.position.y
+
+        const corrBlend = 1 - Math.exp(-4.0 * dt)
+        posX += (targetOdom.position.x - posX) * corrBlend
+        posY += (targetOdom.position.y - posY) * corrBlend
+      }
+
+      const isAtRest = Math.abs(linearVel) < 0.005 && Math.abs(angularVel) < 0.01
+      if (isAtRest) {
+        const restBlend = 1 - Math.exp(-6.0 * dt)
+        posX += (targetOdom.position.x - posX) * restBlend
+        posY += (targetOdom.position.y - posY) * restBlend
+      }
+
+      const targetHeadingRad = (targetOdom.headingDeg * Math.PI) / 180
+      const angErr = Math.atan2(
+        Math.sin(targetHeadingRad - headingRad),
+        Math.cos(targetHeadingRad - headingRad),
+      )
+      const angLambda = Math.abs(angularVel) > 0.08 ? 6.0 : (isAtRest ? 8.0 : 4.0)
+      headingRad += angErr * (1 - Math.exp(-angLambda * dt))
+      headingRad = Math.atan2(Math.sin(headingRad), Math.cos(headingRad))
     }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // 4. Heading convergence (every frame — prevents unbounded drift)
-    //
-    //    Even after dead-reckoning, we softly pull heading toward the
-    //    authoritative telemetry value each frame. This catches any
-    //    accumulated floating-point error and ensures alignment with odom.
-    //    Lambda=6 during turns (fast-tracking), 4 at rest (gentle).
-    // ─────────────────────────────────────────────────────────────────────
-    const targetHeadingRad = (targetOdom.headingDeg * Math.PI) / 180
-
-    // Shortest-path angular error, always pull softly toward authoritative heading
-    const angErr = Math.atan2(
-      Math.sin(targetHeadingRad - headingRad),
-      Math.cos(targetHeadingRad - headingRad),
-    )
-    const angLambda = Math.abs(angularVel) > 0.08 ? 6.0 : 4.0
-    headingRad += angErr * (1 - Math.exp(-angLambda * dt))
-
-    // Normalize to [-PI, PI] to prevent unbounded accumulation
-    headingRad = Math.atan2(Math.sin(headingRad), Math.cos(headingRad))
 
     // ─────────────────────────────────────────────────────────────────────
     // 5. Suspension Physics (purely visual — pitch & roll)

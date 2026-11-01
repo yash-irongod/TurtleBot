@@ -1,5 +1,5 @@
-import type { CellState, OccupancyGrid, Position2D } from '../types/robot'
-import { normalizeDeg } from './polar'
+import type { CellState, OccupancyGrid, Position2D } from '../types/robot.ts'
+import { normalizeDeg } from './polar.ts'
 
 /**
  * Single authoritative conversion layer between ROS REP-103 standard coordinates

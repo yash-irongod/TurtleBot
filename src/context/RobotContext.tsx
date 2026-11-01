@@ -16,6 +16,7 @@ import type {
   SystemPanel,
   VelocityCommand,
   VelocityIntentSource,
+  VirtualBoundary,
   Waypoint,
 } from '../types/robot'
 import { mockRobotDataSource } from '../data/mockTelemetry'
@@ -86,6 +87,7 @@ function demoAutonomyCommand(telemetry: RobotTelemetry, goal: NonNullable<Naviga
 
 interface RobotContextValue {
   telemetry: RobotTelemetry
+  getLatestTelemetry: () => RobotTelemetry
   /** Exact, authoritative source state. DEMO never means a ROS connection. */
   sourceStatus: RobotSourceStatus
   /** Lowercase presentation mapping retained for existing environment-aware UI. */
@@ -154,6 +156,13 @@ interface RobotContextValue {
   emergencyStopped: boolean
   triggerEmergencyStop: () => void
   resetEmergencyStop: () => void
+
+  virtualBoundary: VirtualBoundary
+  setVirtualBoundary: (boundary: VirtualBoundary) => void
+  toggleVirtualBoundary: (enabled?: boolean) => void
+  isEditingBoundary: boolean
+  setIsEditingBoundary: (editing: boolean) => void
+  resetBoundaryAroundRobot: (widthM?: number, heightM?: number) => void
 }
 
 const RobotContext = createContext<RobotContextValue | null>(null)
@@ -172,11 +181,88 @@ interface RobotProviderProps {
  * transport; this provider owns UI state, source provenance, command safety,
  * and the explicitly DEMO-only navigation/puppy models.
  */
+const DEFAULT_VIRTUAL_BOUNDARY: VirtualBoundary = {
+  enabled: false,
+  minX: -0.6,
+  maxX: 0.6,
+  minY: -0.4,
+  maxY: 0.4,
+  safetyMarginM: 0.08,
+}
+
+function getStoredVirtualBoundary(): VirtualBoundary {
+  if (typeof window !== 'undefined') {
+    try {
+      const stored = localStorage.getItem('turtlebot_virtual_boundary')
+      if (stored) {
+        const parsed = JSON.parse(stored)
+        if (typeof parsed.minX === 'number' && typeof parsed.maxX === 'number') {
+          return {
+            enabled: Boolean(parsed.enabled),
+            minX: parsed.minX,
+            maxX: parsed.maxX,
+            minY: parsed.minY,
+            maxY: parsed.maxY,
+            safetyMarginM: typeof parsed.safetyMarginM === 'number' ? parsed.safetyMarginM : 0.08,
+          }
+        }
+      }
+    } catch {}
+  }
+  return DEFAULT_VIRTUAL_BOUNDARY
+}
+
 export function RobotProvider({ children, dataSource = mockRobotDataSource }: RobotProviderProps) {
   const [telemetry, setTelemetry] = useState<RobotTelemetry>(() => dataSource.getInitialTelemetry())
   const latestTelemetryRef = useRef(telemetry)
   const lastPresentationAtRef = useRef(0)
   const [sourceStatus, setSourceStatus] = useState<RobotSourceStatus>(() => dataSource.sourceStatus)
+  const [virtualBoundary, setVirtualBoundaryState] = useState<VirtualBoundary>(() => getStoredVirtualBoundary())
+  const [isEditingBoundary, setIsEditingBoundary] = useState(false)
+
+  useEffect(() => {
+    return dataSource.subscribeVirtualBoundary?.((b) => {
+      setVirtualBoundaryState(b)
+      try {
+        localStorage.setItem('turtlebot_virtual_boundary', JSON.stringify(b))
+      } catch {}
+    })
+  }, [dataSource])
+
+  const setVirtualBoundary = useCallback((boundary: VirtualBoundary) => {
+    setVirtualBoundaryState(boundary)
+    try {
+      localStorage.setItem('turtlebot_virtual_boundary', JSON.stringify(boundary))
+    } catch {}
+    dataSource.setVirtualBoundary?.(boundary)
+  }, [dataSource])
+
+  const toggleVirtualBoundary = useCallback((enabled?: boolean) => {
+    setVirtualBoundaryState((prev: VirtualBoundary) => {
+      const next = { ...prev, enabled: enabled !== undefined ? enabled : !prev.enabled }
+      try {
+        localStorage.setItem('turtlebot_virtual_boundary', JSON.stringify(next))
+      } catch {}
+      dataSource.setVirtualBoundary?.(next)
+      return next
+    })
+  }, [dataSource])
+
+  const resetBoundaryAroundRobot = useCallback((widthM = 1.2, heightM = 0.8) => {
+    const rx = latestTelemetryRef.current.odometry.position.x
+    const ry = latestTelemetryRef.current.odometry.position.y
+    const halfW = widthM / 2
+    const halfH = heightM / 2
+    const next: VirtualBoundary = {
+      enabled: true,
+      minX: Number((rx - halfW).toFixed(2)),
+      maxX: Number((rx + halfW).toFixed(2)),
+      minY: Number((ry - halfH).toFixed(2)),
+      maxY: Number((ry + halfH).toFixed(2)),
+      safetyMarginM: 0.08,
+    }
+    setVirtualBoundary(next)
+  }, [setVirtualBoundary])
   const [sourceNavigation, setSourceNavigation] = useState<NavigationInfo>(
     () => dataSource.navigation?.getInitialNavigation() ?? EMPTY_NAVIGATION,
   )
@@ -438,6 +524,19 @@ const setActiveMode = useCallback(
     (position: Position2D, autoStart = false) => {
       if (!canEditMapGoal || !Number.isFinite(position.x) || !Number.isFinite(position.y)) return
 
+      // Tabletop safety guard: clamp target safely inside virtual boundary
+      if (virtualBoundary.enabled) {
+        const m = virtualBoundary.safetyMarginM ?? 0.08
+        const minX = virtualBoundary.minX + m
+        const maxX = virtualBoundary.maxX - m
+        const minY = virtualBoundary.minY + m
+        const maxY = virtualBoundary.maxY - m
+        position = {
+          x: Math.max(minX, Math.min(maxX, position.x)),
+          y: Math.max(minY, Math.min(maxY, position.y)),
+        }
+      }
+
       // Moving a target must synchronously inhibit a prior DEMO command.
       clearVelocityIntent('autonomy')
       if (sourceStatus === 'DEMO') {
@@ -470,7 +569,7 @@ const setActiveMode = useCallback(
         }, 60)
       }
     },
-    [canEditMapGoal, clearVelocityIntent, dataSource, demoNavigation, sourceStatus, navigation.navigationState, autoNavigateOnClick]
+    [canEditMapGoal, clearVelocityIntent, dataSource, demoNavigation, sourceStatus, navigation.navigationState, autoNavigateOnClick, virtualBoundary]
   )
 
   const startNavigation = useCallback(() => {
@@ -584,10 +683,28 @@ const setActiveMode = useCallback(
     setEmergencyStopped(false)
   }, [stopMotion])
 
+  const isAutonomousDriving =
+    (activeMode === 'AUTONOMOUS' || motionOwner === 'NAVIGATION' || motionOwner === 'EXPLORATION') &&
+    (navigation.navigationState === 'NAVIGATING' ||
+      navigation.navigationState === 'PLANNING' ||
+      exploration.state === 'EXPLORING' ||
+      exploration.state === 'STARTING')
+
   const { activeKeys } = useKeyboardDrive({
-    enabled: (activeMode === 'MANUAL' || activeMode === 'AUTONOMOUS') && !emergencyStopped && sourceStatus !== 'DISCONNECTED',
+    enabled:
+      !isAutonomousDriving &&
+      !emergencyStopped &&
+      sourceStatus !== 'DISCONNECTED' &&
+      (activeMode === 'MANUAL' || activeMode === 'AUTONOMOUS'),
     onCommand: (command) => setVelocityIntent('keyboard', command),
     onRelease: () => clearVelocityIntent('keyboard'),
+    onSpace: () => {
+      if (isAutonomousDriving) {
+        cancelNavigation()
+      } else {
+        stopMotion()
+      }
+    },
   })
 
   const autoNavigationActive =
@@ -598,6 +715,10 @@ const setActiveMode = useCallback(
     navigation.goal !== null
 
   useEffect(() => {
+    // Autonomy proportional velocity loop applies ONLY to DEMO simulation.
+    // In LIVE mode, Nav2 running on the robot/VM publishes commands to /cmd_vel directly.
+    if (sourceStatus !== 'DEMO') return
+
     if (!autoNavigationActive || !navigation.goal) {
       clearVelocityIntent('autonomy')
       return
@@ -607,6 +728,7 @@ const setActiveMode = useCallback(
     // so the proportional controller responds to the freshest position data.
     setVelocityIntent('autonomy', demoAutonomyCommand(latestTelemetryRef.current, navigation.goal))
   }, [
+    sourceStatus,
     autoNavigationActive,
     clearVelocityIntent,
     navigation.goal,
@@ -714,6 +836,7 @@ const setActiveMode = useCallback(
   const value = useMemo<RobotContextValue>(
     () => ({
       telemetry,
+      getLatestTelemetry: () => latestTelemetryRef.current,
       sourceStatus,
       environment,
       sessionStartedAt,
@@ -770,6 +893,13 @@ const setActiveMode = useCallback(
       emergencyStopped,
       triggerEmergencyStop,
       resetEmergencyStop,
+
+      virtualBoundary,
+      setVirtualBoundary,
+      toggleVirtualBoundary,
+      isEditingBoundary,
+      setIsEditingBoundary,
+      resetBoundaryAroundRobot,
     }),
     [
       acquireTarget,
@@ -816,6 +946,12 @@ const setActiveMode = useCallback(
       triggerEmergencyStop,
       bridgeUrl,
       setBridgeUrl,
+      virtualBoundary,
+      setVirtualBoundary,
+      toggleVirtualBoundary,
+      isEditingBoundary,
+      setIsEditingBoundary,
+      resetBoundaryAroundRobot,
     ],
   )
 

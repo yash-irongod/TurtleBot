@@ -36,7 +36,7 @@ export function Drive3DView({
   showMinimap = true,
   onToggleFull2DMap,
 }: Drive3DViewProps) {
-  const { telemetry, navigation, emergencyStopped, sourceStatus, liveOccupancyGrid, exploration } = useRobot()
+  const { telemetry, getLatestTelemetry, navigation, emergencyStopped, sourceStatus, liveOccupancyGrid, exploration } = useRobot()
   const isLive = sourceStatus === 'LIVE'
 
   const containerRef = useRef<HTMLDivElement>(null)
@@ -65,6 +65,8 @@ export function Drive3DView({
   modeRef.current = mode
   const sourceStatusRef = useRef(sourceStatus)
   sourceStatusRef.current = sourceStatus
+  const getLatestTelemetryRef = useRef(getLatestTelemetry)
+  getLatestTelemetryRef.current = getLatestTelemetry
 
   const cameraModeRef = useRef(cameraMode)
   cameraModeRef.current = cameraMode
@@ -210,7 +212,8 @@ export function Drive3DView({
         const dt = Math.min(0.064, Math.max(0.001, (now - lastTime) / 1000))
         lastTime = now
 
-        const rawOdom = telemetryRef.current.odometry
+        const latestTel = getLatestTelemetryRef.current()
+        const rawOdom = latestTel.odometry
         const nav = navigationRef.current
         const currentMode = modeRef.current
         const isLiveSource = sourceStatusRef.current === 'LIVE'
@@ -286,7 +289,7 @@ export function Drive3DView({
 
         // D. Update dynamic chase camera with route-aware framing
         driveCamera.update(dt, kPose.position, kPose.headingDeg, kPose.linearVelocity, kPose.angularVelocity, nav?.goal?.position)
-        environment.updateLidarPoints(telemetryRef.current.lidar.points, kPose.position, kPose.headingDeg)
+        environment.updateLidarPoints(latestTel.lidar.points, kPose.position, kPose.headingDeg)
         environment.update(dt, kPose.position, kPose.linearVelocity, driveCamera.camera.position)
 
         // E. Screen-space goal / frontier reticle calculation

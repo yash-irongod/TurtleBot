@@ -17,8 +17,9 @@ import type {
   RobotTelemetry,
   SelectedFrontier,
   VelocityCommand,
+  VirtualBoundary,
   Waypoint,
-} from '../types/robot'
+} from '../types/robot.ts'
 import {
   convertRosOccupancyGridToFrontend,
   frontendHeadingDegToRosYaw,
@@ -26,11 +27,14 @@ import {
   rosToFrontendPosition,
   rosYawToFrontendHeadingDeg,
   type RosOccupancyGridPayload,
-} from '../lib/rosCoordinates'
+} from '../lib/rosCoordinates.ts'
 
 const DEFAULT_ROS_BRIDGE_URL = 'ws://localhost:8765'
 const RECONNECT_DELAY_MS = 3000
 const LIDAR_RANGE_MAX_DEFAULT = 3.5
+
+// Tracks timestamp of latest authoritative map-frame pose received from bridge/TF
+let lastMapPoseTime = 0
 
 export function getStoredBridgeUrl(): string {
   if (typeof window !== 'undefined') {
@@ -118,63 +122,67 @@ function parseBridgePayload(raw: any, current: RobotTelemetry): RobotTelemetry {
   let odometry: OdometryState = current.odometry
   if (rawOdom) {
     const rawMapPose = data.map_pose ?? rawOdom.map_pose
-    const rawPos = rawMapPose?.position ?? rawOdom.position ?? rawOdom.pose?.pose?.position ?? rawOdom.pose?.position ?? rawOdom
-    const rawX =
-      typeof rawPos.x === 'number'
-        ? rawPos.x
-        : typeof data.x === 'number'
-          ? data.x
-          : odometry.position.x
-    const rawY =
-      typeof rawPos.y === 'number'
-        ? rawPos.y
-        : typeof data.y === 'number'
-          ? data.y
-          : -odometry.position.y
+    const hasMapPose = Boolean(
+      rawMapPose &&
+      rawMapPose.position &&
+      typeof rawMapPose.position.x === 'number' &&
+      typeof rawMapPose.position.y === 'number'
+    )
+    if (hasMapPose) {
+      lastMapPoseTime = Date.now()
+    }
+    const hasFreshMapPose = Date.now() - lastMapPoseTime < 1000
 
-    // Convert ROS REP-103 (+X East, +Y North) to frontend presentation (+X East, -Y North)
-    const position = rosToFrontendPosition(rawX, rawY)
-
-    // Prefer TF-derived map-frame yaw. Fall back to raw /odom yaw if TF is unavailable.
-    // headingDeg (legacy, 0=East ROS convention). Both need rosYawToFrontendHeadingDeg
-    // to produce frontend compass bearing: 0°=North, 90°=East, increases CW.
-    let headingDeg = odometry.headingDeg
-    if (typeof rawMapPose?.yaw_rad === 'number') {
-      headingDeg = rosYawToFrontendHeadingDeg(rawMapPose.yaw_rad)
-    } else if (typeof rawOdom.yaw_rad === 'number') {
-      headingDeg = rosYawToFrontendHeadingDeg(rawOdom.yaw_rad)
-    } else if (typeof rawOdom.headingDeg === 'number') {
-      // Legacy path: bridge sent degrees in ROS convention (0=East) — convert
-      headingDeg = rosYawToFrontendHeadingDeg((rawOdom.headingDeg * Math.PI) / 180)
-    } else if (typeof data.headingDeg === 'number') {
-      headingDeg = rosYawToFrontendHeadingDeg((data.headingDeg * Math.PI) / 180)
-    } else if (typeof rawOdom.heading === 'number') {
-      headingDeg = rosYawToFrontendHeadingDeg((rawOdom.heading * Math.PI) / 180)
-    } else if (typeof rawOdom.yaw === 'number') {
-      headingDeg = rosYawToFrontendHeadingDeg(rawOdom.yaw)
-    } else if (typeof data.yaw === 'number') {
-      headingDeg = rosYawToFrontendHeadingDeg(data.yaw)
-    } else {
-      const q =
-        rawOdom.orientation ??
-        rawOdom.pose?.pose?.orientation ??
-        rawOdom.pose?.orientation ??
-        data.orientation ??
-        data.pose?.orientation
-      if (q && typeof q.z === 'number' && typeof q.w === 'number') {
-        const qx = q.x ?? 0
-        const qy = q.y ?? 0
-        const qz = q.z
-        const qw = q.w
-        const sinyCosp = 2 * (qw * qz + qx * qy)
-        const cosyCosp = 1 - 2 * (qy * qy + qz * qz)
-        const yawRad = Math.atan2(sinyCosp, cosyCosp)
-        headingDeg = rosYawToFrontendHeadingDeg(yawRad)
-      }
+    let position = odometry.position
+    if (hasMapPose) {
+      position = rosToFrontendPosition(rawMapPose.position.x, rawMapPose.position.y)
+    } else if (!hasFreshMapPose) {
+      const rawPos =
+        rawOdom.position ??
+        rawOdom.pose?.pose?.position ??
+        rawOdom.pose?.position ??
+        rawOdom
+      const rawX = typeof rawPos.x === 'number' ? rawPos.x : (typeof data.x === 'number' ? data.x : odometry.position.x)
+      const rawY = typeof rawPos.y === 'number' ? rawPos.y : (typeof data.y === 'number' ? data.y : -odometry.position.y)
+      position = rosToFrontendPosition(rawX, rawY)
     }
 
-    // Normalized to [0, 360)
-    headingDeg = ((headingDeg % 360) + 360) % 360
+    let headingDeg = odometry.headingDeg
+    if (hasMapPose && typeof rawMapPose.yaw_rad === 'number') {
+      headingDeg = rosYawToFrontendHeadingDeg(rawMapPose.yaw_rad)
+    } else if (!hasFreshMapPose) {
+      if (typeof rawOdom.yaw_rad === 'number') {
+        headingDeg = rosYawToFrontendHeadingDeg(rawOdom.yaw_rad)
+      } else if (typeof rawOdom.headingDeg === 'number') {
+        headingDeg = rosYawToFrontendHeadingDeg((rawOdom.headingDeg * Math.PI) / 180)
+      } else if (typeof data.headingDeg === 'number') {
+        headingDeg = rosYawToFrontendHeadingDeg((data.headingDeg * Math.PI) / 180)
+      } else if (typeof rawOdom.heading === 'number') {
+        headingDeg = rosYawToFrontendHeadingDeg((rawOdom.heading * Math.PI) / 180)
+      } else if (typeof rawOdom.yaw === 'number') {
+        headingDeg = rosYawToFrontendHeadingDeg(rawOdom.yaw)
+      } else if (typeof data.yaw === 'number') {
+        headingDeg = rosYawToFrontendHeadingDeg(data.yaw)
+      } else {
+        const q =
+          rawOdom.orientation ??
+          rawOdom.pose?.pose?.orientation ??
+          rawOdom.pose?.orientation ??
+          data.orientation ??
+          data.pose?.orientation
+        if (q && typeof q.z === 'number' && typeof q.w === 'number') {
+          const qx = q.x ?? 0
+          const qy = q.y ?? 0
+          const qz = q.z
+          const qw = q.w
+          const sinyCosp = 2 * (qw * qz + qx * qy)
+          const cosyCosp = 1 - 2 * (qy * qy + qz * qz)
+          const yawRad = Math.atan2(sinyCosp, cosyCosp)
+          headingDeg = rosYawToFrontendHeadingDeg(yawRad)
+        }
+      }
+      headingDeg = ((headingDeg % 360) + 360) % 360
+    }
 
     // Velocities: consume linear_x and angular_z per bridge.py specification
     const linearVelocity =
@@ -420,7 +428,6 @@ export function createRosRobotDataSource(options: RosRobotDataSourceOptions = {}
 
   // Live map grid
   let liveMap: OccupancyGrid | null = null
-  let pendingReplacementGoal: Waypoint | null = null
 
   const telemetryListeners = new Set<(telemetry: RobotTelemetry) => void>()
   const statusListeners = new Set<(status: RobotSourceStatus) => void>()
@@ -428,6 +435,33 @@ export function createRosRobotDataSource(options: RosRobotDataSourceOptions = {}
   const navListeners = new Set<(navigation: NavigationInfo) => void>()
   const explorationListeners = new Set<(exploration: ExplorationInfo) => void>()
   const mapListeners = new Set<(map: OccupancyGrid | null) => void>()
+  const boundaryListeners = new Set<(boundary: VirtualBoundary) => void>()
+  function loadInitialStoredBoundary(): VirtualBoundary | null {
+    if (typeof window === 'undefined') return null
+    try {
+      const stored = localStorage.getItem('turtlebot_virtual_boundary')
+      if (stored) {
+        const parsed = JSON.parse(stored)
+        if (typeof parsed.minX === 'number' && typeof parsed.maxX === 'number' && typeof parsed.minY === 'number' && typeof parsed.maxY === 'number') {
+          return {
+            enabled: Boolean(parsed.enabled),
+            minX: parsed.minX,
+            maxX: parsed.maxX,
+            minY: parsed.minY,
+            maxY: parsed.maxY,
+            safetyMarginM: typeof parsed.safetyMarginM === 'number' ? parsed.safetyMarginM : 0.08,
+            rotationDeg: typeof parsed.rotationDeg === 'number' ? parsed.rotationDeg : 0,
+          }
+        }
+      }
+    } catch {}
+    return null
+  }
+  let lastVirtualBoundary: VirtualBoundary | null = loadInitialStoredBoundary()
+  const notifyVirtualBoundary = (b: VirtualBoundary) => {
+    lastVirtualBoundary = b
+    boundaryListeners.forEach((listener) => listener(b))
+  }
 
   let mappingStatus: 'idle' | 'starting' | 'ready' | 'streaming' | 'error' = 'idle'
   const mappingStatusListeners = new Set<(status: 'idle' | 'starting' | 'ready' | 'streaming' | 'error') => void>()
@@ -486,7 +520,6 @@ export function createRosRobotDataSource(options: RosRobotDataSourceOptions = {}
   }
 
   const resetLiveState = () => {
-    pendingReplacementGoal = null
     notifyNav({
       navigationState: 'IDLE',
       goal: null,
@@ -567,6 +600,24 @@ export function createRosRobotDataSource(options: RosRobotDataSourceOptions = {}
             socket.close(1000, 'Bridge handshake timeout')
           } catch {}
         }, 20000)
+        const boundaryToSend = lastVirtualBoundary || loadInitialStoredBoundary()
+        if (boundaryToSend) {
+          lastVirtualBoundary = boundaryToSend
+          try {
+            socket.send(
+              JSON.stringify({
+                type: 'set_virtual_boundary',
+                enabled: boundaryToSend.enabled,
+                min_x: boundaryToSend.minX,
+                max_x: boundaryToSend.maxX,
+                min_y: boundaryToSend.minY,
+                max_y: boundaryToSend.maxY,
+                safety_margin: boundaryToSend.safetyMarginM,
+                rotation_deg: boundaryToSend.rotationDeg ?? 0,
+              })
+            )
+          } catch {}
+        }
       }
 
       socket.onmessage = (event) => {
@@ -598,11 +649,46 @@ export function createRosRobotDataSource(options: RosRobotDataSourceOptions = {}
             notifyMappingStatus(raw.status as any)
             return
           }
+          if (msgType === 'virtual_boundary' && raw.boundary) {
+            const b = raw.boundary
+            if (typeof b.min_x === 'number' && typeof b.max_x === 'number') {
+              notifyVirtualBoundary({
+                enabled: Boolean(b.enabled),
+                minX: b.min_x,
+                maxX: b.max_x,
+                minY: b.min_y,
+                maxY: b.max_y,
+                safetyMarginM: typeof b.safety_margin === 'number' ? b.safety_margin : 0.08,
+                rotationDeg: typeof b.rotation_deg === 'number' ? b.rotation_deg : (typeof b.rotationDeg === 'number' ? b.rotationDeg : 0),
+              })
+            }
+            return
+          }
 
           if (isMapMsg && rawMapData) {
             const grid = convertRosOccupancyGridToFrontend(rawMapData as RosOccupancyGridPayload)
             notifyMap(grid)
             notifyMappingStatus('streaming')
+            return
+          }
+
+          if (msgType === 'pose_map') {
+            const pose = raw.pose ?? raw
+            const pos = pose.position
+            if (pos && typeof pos.x === 'number' && typeof pos.y === 'number' && typeof pose.yaw_rad === 'number') {
+              lastMapPoseTime = Date.now()
+              const fPos = rosToFrontendPosition(pos.x, pos.y)
+              const headingDeg = rosYawToFrontendHeadingDeg(pose.yaw_rad)
+              telemetry = {
+                ...telemetry,
+                odometry: {
+                  ...telemetry.odometry,
+                  position: fPos,
+                  headingDeg,
+                },
+              }
+              notifyTelemetry(telemetry)
+            }
             return
           }
 
@@ -633,6 +719,7 @@ export function createRosRobotDataSource(options: RosRobotDataSourceOptions = {}
               globalPathFrame: frameId,
               planRevision: (navInfo.planRevision ?? 0) + 1,
               detail: typeof nav.detail === 'string' ? nav.detail : navInfo.detail,
+              navigationState: nav.status === 'READY' ? 'READY' : navInfo.navigationState,
             })
             return
           }
@@ -675,18 +762,7 @@ export function createRosRobotDataSource(options: RosRobotDataSourceOptions = {}
               nextGoal = { ...nextGoal, status: 'reached' }
             }
 
-            // A map target selected while Nav2 was active is held locally until the old
-            // goal reaches terminal CANCELED. This prevents the UI from losing the new
-            // target when the backend reports completion of the superseded goal.
-            if (pendingReplacementGoal) {
-              nextGoal = { ...pendingReplacementGoal, status: 'pending' }
-              if (nextState === 'CANCELED') {
-                resolvedState = 'READY'
-                pendingReplacementGoal = null
-              } else if (nextState === 'IDLE' || nextState === 'FAILED' || nextState === 'GOAL_REACHED') {
-                pendingReplacementGoal = null
-              }
-            }
+
 
             const nextPath = Array.isArray(nav.path)
               ? nav.path.map((point: any) => rosToFrontendPosition(point.x, point.y))
@@ -713,8 +789,7 @@ export function createRosRobotDataSource(options: RosRobotDataSourceOptions = {}
           }
 
           if (msgType === 'init') {
-            pendingReplacementGoal = null
-            if (handshakeTimer !== null) {
+                    if (handshakeTimer !== null) {
               window.clearTimeout(handshakeTimer)
               handshakeTimer = null
             }
@@ -771,10 +846,35 @@ export function createRosRobotDataSource(options: RosRobotDataSourceOptions = {}
 
           if (msgType === 'manual_session_expired') {
             if (!manualSessionId || raw.manual_session_id === manualSessionId) {
+              const activeLinear = lastVelocityCommand.linear
+              const activeAngular = lastVelocityCommand.angular
               manualSessionId = null
-              lastVelocityCommand = { linear: 0, angular: 0 }
               clearManualHeartbeat()
               manualSessionExpiredListeners.forEach((listener) => listener())
+
+              if ((activeLinear !== 0 || activeAngular !== 0) && ws && ws.readyState === WebSocket.OPEN && status === 'LIVE') {
+                const freshSessionId = createManualSessionId()
+                manualSessionId = freshSessionId
+                lastVelocityCommand = { linear: activeLinear, angular: activeAngular }
+                try {
+                  sendVelocityPayload(ws, lastVelocityCommand, freshSessionId, true)
+                  manualHeartbeatTimer = window.setInterval(() => {
+                    if (!ws || ws.readyState !== WebSocket.OPEN || status !== 'LIVE' || !manualSessionId) {
+                      clearManualHeartbeat()
+                      return
+                    }
+                    try {
+                      sendVelocityPayload(ws, lastVelocityCommand, manualSessionId, false)
+                    } catch {
+                      clearManualHeartbeat()
+                    }
+                  }, 100)
+                } catch {
+                  manualSessionId = null
+                }
+              } else {
+                lastVelocityCommand = { linear: 0, angular: 0 }
+              }
             }
             return
           }
@@ -863,19 +963,6 @@ export function createRosRobotDataSource(options: RosRobotDataSourceOptions = {}
       }
     },
     setGoal: (goal: Waypoint) => {
-      const hasActiveNav = ['PLANNING', 'NAVIGATING', 'PAUSED', 'CANCELING'].includes(navInfo.navigationState)
-      if (hasActiveNav) {
-        pendingReplacementGoal = { ...goal, status: 'pending' }
-        notifyNav({
-          ...navInfo,
-          navigationState: 'CANCELING',
-          goal: pendingReplacementGoal,
-          distanceRemainingM: 0,
-          progressPct: 0,
-        })
-        return
-      }
-      pendingReplacementGoal = null
       notifyNav({
         ...navInfo,
         navigationState: 'READY',
@@ -883,19 +970,28 @@ export function createRosRobotDataSource(options: RosRobotDataSourceOptions = {}
         distanceRemainingM: 0,
         progressPct: 0,
       })
+
+      if (status === 'LIVE' && ws && ws.readyState === WebSocket.OPEN) {
+        const rosPos = frontendToRosPosition(goal.position)
+        const rosYaw = goal.goalHeadingDeg !== undefined
+          ? frontendHeadingDegToRosYaw(goal.goalHeadingDeg)
+          : 0.0
+        try {
+          ws.send(JSON.stringify({
+            type: 'plan_goal',
+            x: rosPos.x,
+            y: rosPos.y,
+            yaw: rosYaw,
+          }))
+        } catch {}
+      }
     },
     startNavigation: () => {
       if (status !== 'LIVE' || !ws || ws.readyState !== WebSocket.OPEN || !navInfo.goal) return
-      if (navInfo.navigationState === 'CANCELING') return
-      pendingReplacementGoal = null
 
       // Convert frontend target position to ROS map frame (x_ros = x_front, y_ros = -y_front)
       const rosPos = frontendToRosPosition(navInfo.goal.position)
-      // Use goal's heading if explicitly set; otherwise default to 0 (face East / +X)
-      // which is the standard "don't care about final orientation" convention.
-      // Previously this used the robot's CURRENT heading, which is wrong — the goal
-      // orientation should describe the desired pose AT the destination, not where
-      // the robot is currently facing.
+      // Use goal's heading if explicitly set; otherwise default to 0.0 (any yaw is accepted by Nav2)
       const rosYaw = navInfo.goal.goalHeadingDeg !== undefined
         ? frontendHeadingDegToRosYaw(navInfo.goal.goalHeadingDeg)
         : 0.0
@@ -921,7 +1017,6 @@ export function createRosRobotDataSource(options: RosRobotDataSourceOptions = {}
     },
     cancelNavigation: () => {
       if (status !== 'LIVE' || !ws || ws.readyState !== WebSocket.OPEN) return
-      pendingReplacementGoal = null
       try {
         // LIVE cancellation is asynchronous. Let bridge.py report CANCELING and the
         // final terminal state so the frontend never releases ownership prematurely.
@@ -1028,15 +1123,19 @@ export function createRosRobotDataSource(options: RosRobotDataSourceOptions = {}
       }
 
       if (!isNonZero) {
+        const hadActiveManual = manualSessionId !== null || lastVelocityCommand.linear !== 0 || lastVelocityCommand.angular !== 0
         const sessionAtStop = manualSessionId
         lastVelocityCommand = { linear: 0, angular: 0 }
-        try {
-          sendVelocityPayload(socket, lastVelocityCommand, sessionAtStop, false)
-        } catch {
-          // The local lease is still invalidated even if the explicit zero could not send.
-        }
         manualSessionId = null
         clearManualHeartbeat()
+        // Only send zero command over wire if terminating an active manual drive session
+        if (hadActiveManual) {
+          try {
+            sendVelocityPayload(socket, { linear: 0, angular: 0 }, sessionAtStop, false)
+          } catch {
+            // The local lease is still invalidated even if the explicit zero could not send.
+          }
+        }
         return
       }
 
@@ -1069,7 +1168,7 @@ export function createRosRobotDataSource(options: RosRobotDataSourceOptions = {}
           } catch {
             clearManualHeartbeat()
           }
-        }, 200)
+        }, 100)
       }
     },
 
@@ -1145,6 +1244,32 @@ export function createRosRobotDataSource(options: RosRobotDataSourceOptions = {}
       listener(mappingStatus)
       return () => {
         mappingStatusListeners.delete(listener)
+      }
+    },
+    setVirtualBoundary: (b: VirtualBoundary) => {
+      lastVirtualBoundary = b
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(
+            JSON.stringify({
+              type: 'set_virtual_boundary',
+              enabled: b.enabled,
+              min_x: b.minX,
+              max_x: b.maxX,
+              min_y: b.minY,
+              max_y: b.maxY,
+              safety_margin: b.safetyMarginM,
+              rotation_deg: b.rotationDeg ?? 0,
+            })
+          )
+        } catch {}
+      }
+    },
+    subscribeVirtualBoundary: (listener) => {
+      boundaryListeners.add(listener)
+      if (lastVirtualBoundary) listener(lastVirtualBoundary)
+      return () => {
+        boundaryListeners.delete(listener)
       }
     },
     getBridgeUrl: () => currentUrl,
